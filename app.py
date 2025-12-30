@@ -308,9 +308,13 @@ with tab_portfolio:
             
             # Dynamic Target
             def calc_target(row):
-                r = row['Risk']
-                e = row['Entry']
-                tqs = row.get('TQS', 7)
+                try:
+                    r = float(row['Risk'])
+                    e = float(row['Entry'])
+                    tqs = int(float(row.get('TQS', 7))) # Handle string '9' or '9.0'
+                except:
+                    r, e, tqs = 1.0, 100.0, 7
+                
                 if tqs >= 9:
                     return e + (2 * r) # 2R
                 return e + (1.5 * r) # 1.5R
