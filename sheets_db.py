@@ -10,11 +10,19 @@ SHEET_NAME = "Swing_Trades_DB"
 CREDENTIALS_FILE = "service_account.json"
 
 def connect_db():
-    """Connects to Google Sheets and returns the Worksheet object."""
+    """Connects to Google Sheets using Streamlit Secrets (Cloud) or Local File."""
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, SCOPE)
+        # 1. Try Streamlit Secrets (Cloud / Best Practice)
+        if "gcp_service_account" in st.secrets:
+             creds_dict = st.secrets["gcp_service_account"]
+             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+        else:
+             # 2. Fallback to Local File
+             creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, SCOPE)
+             
         client = gspread.authorize(creds)
         sheet = client.open(SHEET_NAME)
+        
         # Try to open "OpenPositions" tab, create if missing
         try:
             worksheet = sheet.worksheet("OpenPositions")
@@ -23,21 +31,16 @@ def connect_db():
             try:
                 if worksheet.cell(1, 11).value != "TQS":
                     worksheet.update_cell(1, 11, "TQS")
-                    # Also ensure Date header is present
-                    if worksheet.cell(1, 1).value != "Date":
-                         worksheet.update_cell(1, 1, "Date")
+                    if worksheet.cell(1, 1).value != "Date": worksheet.update_cell(1, 1, "Date")
             except:
-                # If Col 11 is empty/out of bounds
                 worksheet.update_cell(1, 11, "TQS")
-                
         except:
             worksheet = sheet.add_worksheet(title="OpenPositions", rows=100, cols=11)
-            # Init Headers
             worksheet.append_row(["Date", "Symbol", "Entry", "Qty", "StopLoss", "Status", "LTP", "PnL_Pct", "ExitPrice", "ExitDate", "TQS"])
             
         return worksheet
     except Exception as e:
-        print(f"DB Error: {e}")
+        # print(f"DB Error: {e}") # Silent fail to avoid UI clutter, or use st.error if debugging
         return None
 
 def fetch_portfolio():
