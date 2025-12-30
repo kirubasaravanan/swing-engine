@@ -1,0 +1,31 @@
+name: Swing Bot (1HR Auto)
+
+on:
+  schedule:
+    # Runs at minute 15 and 45 past every hour from 3 through 10 UTC (approx 8:45 AM - 3:45 PM IST)
+    # This covers Market Open (9:15) to Close (3:30) with 30-min intervals
+    - cron: '15,45 3-10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  swing-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run Swing Bot
+      env:
+        GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      run: |
+        python swing_bot.py

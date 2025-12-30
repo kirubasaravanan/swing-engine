@@ -381,16 +381,17 @@ class SwingEngine:
             
         return exits
 
-    def scan(self):
+    def scan(self, progress_callback=None):
         """Main Scan Loop"""
+        if progress_callback: progress_callback(0.05) # 5% - Starting Download
+        
         raw_data = self.fetch_data()
         results = []
         
         if raw_data is None or raw_data.empty: return []
         
-        if raw_data is None or raw_data.empty: return []
-        
         tickers = self.universe
+        total_tickers = len(tickers)
         
         # Check column levels
         # Debug showed: Batch -> names=['Ticker', 'Price'] (Ticker is Level 0)
@@ -412,7 +413,16 @@ class SwingEngine:
             if 'Close' in raw_data.columns.get_level_values(0):
                  ticker_level = 1
 
-        for ticker in tickers:
+        for i, ticker in enumerate(tickers):
+            # Progress Update (10% to 100%)
+            # We reserve 0-10% for the "Fetch Data" phase which happens before this loop
+            if progress_callback:
+                try:
+                    # Calculate progress: 0.10 + (0.90 * current/total)
+                    p = 0.10 + (0.90 * (i + 1) / total_tickers)
+                    progress_callback(p)
+                except: pass
+
             try:
                 df_tick = None
                 

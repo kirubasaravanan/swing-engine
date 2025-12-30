@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 from engine import SwingEngine
+import sheets_db
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -152,10 +153,31 @@ with st.sidebar:
                 st.error(msg)
                 
     if st.button("RUN SCAN 🚀", type="primary"):
-        with st.spinner("Crunching Live Data..."):
-            results = st.session_state['engine'].scan()
+        with st.status("🚀 Initializing Scan Sequence...", expanded=True) as status:
+            
+            st.write("📡 Connecting to Market Data Feed...")
+            # Simulate slight delay to show progress (optional, but feels responsive)
+            time.sleep(0.5)
+            
+            st.write("🧠 Decisions Engine: Analyzing Volatility & Trends...")
+            
+            # Progress Bar
+            prog_bar = st.progress(0)
+            def update_prog(p):
+                prog_bar.progress(p)
+                
+            results = st.session_state['engine'].scan(progress_callback=update_prog)
+            
+            st.write(f"🔍 Found {len(results)} potential setups.")
+            
+            st.write("💾 Saving Intelligence to Cloud Database...")
+            sheets_db.save_scan_results(results)
             st.session_state['scan_results'] = results
-            st.rerun()
+            
+            status.update(label="✅ Scan Complete!", state="complete", expanded=False)
+            
+        time.sleep(1)
+        st.rerun()
 
 
 # --- AUTHENTICATION ---

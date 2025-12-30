@@ -21,57 +21,60 @@ def test_connection():
     except Exception as e:
         return False, str(e)
 
+@st.cache_resource(ttl=600)
 def connect_db():
     """Connects to Google Sheets using Streamlit Secrets (Cloud) or Local File."""
-    try:
-        creds = None
-        # 1. Try Streamlit Secrets (Cloud / Best Practice)
-        if "gcp_service_account" in st.secrets:
-             creds_dict = st.secrets["gcp_service_account"]
-             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-        # 2. Try Environment Variable (GitHub Actions / Dotenv)
-        elif "GCP_SERVICE_ACCOUNT" in os.environ:
-             import json
-             creds_dict = json.loads(os.environ["GCP_SERVICE_ACCOUNT"])
-             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-        elif os.path.exists(CREDENTIALS_FILE):
-             # 3. Fallback to Local File
-             creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, SCOPE)
-        else:
-             print("❌ Connection Error: No credentials found. Checked 'st.secrets' and 'service_account.json'.")
-             return None
-             
-        client = gspread.authorize(creds)
-        sheet = client.open(SHEET_NAME)
-        
-        # Try to open "OpenPositions" tab, create if missing
-        try:
-            worksheet = sheet.worksheet("OpenPositions")
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = sheet.add_worksheet(title="OpenPositions", rows=100, cols=11)
-            worksheet.append_row(["Date", "Symbol", "Entry", "Qty", "StopLoss", "Status", "LTP", "PnL_Pct", "ExitPrice", "ExitDate", "TQS"])
-        
-        # --- SCHEMA CHECK (Auto-Heal) ---
-        # Ensure TQS header exists (Col 11)
-        try:
-             if worksheet.cell(1, 11).value != "TQS":
-                 worksheet.update_cell(1, 11, "TQS")
-                 if worksheet.cell(1, 1).value != "Date": worksheet.update_cell(1, 1, "Date")
-        except Exception as e:
-             # This might fail if sheet is empty, safe to ignore or log
-             print(f"⚠️ Schema Check Warning: {e}")
+    # NO COMPREHENSIVE TRY/EXCEPT HERE
+    # Reasons: 
+    # 1. cached_resource will cache 'None' if we handle the error and return None.
+    # 2. We want it to FAIL so it retries next time or shows the error trace.
+    
+    creds = None
+    # 1. Try Streamlit Secrets (Cloud / Best Practice)
+    if "gcp_service_account" in st.secrets:
+            creds_dict = st.secrets["gcp_service_account"]
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+    # 2. Try Environment Variable (GitHub Actions / Dotenv)
+    elif "GCP_SERVICE_ACCOUNT" in os.environ:
+            import json
+            creds_dict = json.loads(os.environ["GCP_SERVICE_ACCOUNT"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+    elif os.path.exists(CREDENTIALS_FILE):
+            # 3. Fallback to Local File
+            creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, SCOPE)
+    else:
+            # Raise exception so it's not cached as None
+            available_secrets = list(st.secrets.keys()) if hasattr(st, 'secrets') else "No st.secrets"
+            raise ConnectionError(f"No credentials found. Env: {os.environ.keys()}, Secrets: {available_secrets}")
             
-        return worksheet
+    client = gspread.authorize(creds)
+    sheet = client.open(SHEET_NAME)
+    
+    # Try to open "OpenPositions" tab, create if missing
+    try:
+        worksheet = sheet.worksheet("OpenPositions")
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = sheet.add_worksheet(title="OpenPositions", rows=100, cols=11)
+        worksheet.append_row(["Date", "Symbol", "Entry", "Qty", "StopLoss", "Status", "LTP", "PnL_Pct", "ExitPrice", "ExitDate", "TQS"])
+    
+    # --- SCHEMA CHECK (Auto-Heal) ---
+    # Ensure TQS header exists (Col 11)
+    try:
+            if worksheet.cell(1, 11).value != "TQS":
+                worksheet.update_cell(1, 11, "TQS")
+                if worksheet.cell(1, 1).value != "Date": worksheet.update_cell(1, 1, "Date")
     except Exception as e:
-        print(f"❌ DB Error: {e}") 
-        return None
-    except Exception as e:
-        print(f"❌ DB Error: {e}") 
-        return None
+            # This might fail if sheet is empty, safe to ignore or log
+            print(f"⚠️ Schema Check Warning: {e}")
+        
+    return worksheet
 
 def fetch_portfolio():
     """Fetches all OPEN positions."""
-    ws = connect_db()
+    try:
+        ws = connect_db()
+    except:
+        return []
     if not ws: return []
     
     data = ws.get_all_records()
@@ -86,11 +89,14 @@ def fetch_portfolio():
 
 def fetch_history():
     """Fetches CLOSED trades."""
-    ws_open = connect_db()
+    try:
+        ws_open = connect_db()
+    except:
+        return []
     if not ws_open: return []
     
     try:
-        wb = ws_open.client.open(SHEET_NAME)
+        wb = ws_open.spreadsheet
         ws = wb.worksheet("trades_closed")
         data = ws.get_all_records()
         return data
@@ -99,7 +105,10 @@ def fetch_history():
 
 def add_trade(symbol, entry, qty=1, stop=0, tqs=0):
     """Adds a new trade."""
-    ws = connect_db()
+    try:
+        ws = connect_db()
+    except:
+        return False
     if not ws: return False
     
     date_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -113,7 +122,10 @@ def add_trade(symbol, entry, qty=1, stop=0, tqs=0):
 
 def close_trade_db(symbol, exit_price):
     """Marks a trade as CLOSED."""
-    ws = connect_db()
+    try:
+        ws = connect_db()
+    except:
+        return False
     if not ws: return False
     
     # Find the row
@@ -133,7 +145,10 @@ def close_trade_db(symbol, exit_price):
 
 def delete_trade(symbol):
     """Deletes a trade from OpenPositions (Recycling slot)."""
-    ws = connect_db()
+    try:
+        ws = connect_db()
+    except:
+        return
     if not ws: return
     
     try:
@@ -146,11 +161,15 @@ def delete_trade(symbol):
 def save_scan_results(results):
     """Overwrites 'LatestScan' with fresh data."""
     if not results: return
-    ws = connect_db()
+    try:
+        ws = connect_db()
+    except:
+        print("Save Error: Connection Failed")
+        return
     if not ws: return
     
     try:
-        wb = ws.client.open(SHEET_NAME)
+        wb = ws.spreadsheet
         try:
             worksheet = wb.worksheet("LatestScan")
             worksheet.clear()
@@ -179,11 +198,14 @@ def save_scan_results(results):
 
 def fetch_scan_results():
     """Reads 'LatestScan'. Returns (data, updated_at, error_msg)."""
-    ws = connect_db()
+    try:
+        ws = connect_db()
+    except Exception as e:
+        return [], None, f"DB Connection Failed: {e}"
     if not ws: return [], None, "DB Connection Failed"
     
     try:
-        wb = ws.client.open(SHEET_NAME)
+        wb = ws.spreadsheet
         worksheet = wb.worksheet("LatestScan")
         data = worksheet.get_all_records()
         
@@ -198,11 +220,14 @@ def fetch_scan_results():
 
 def archive_trade(trade_data):
     """Log closed trade to 'trades_closed'"""
-    ws_open = connect_db() # Just to get client
+    try:
+        ws_open = connect_db() 
+    except:
+        return False
     if not ws_open: return False
     
     try:
-        wb = ws_open.client.open(SHEET_NAME)
+        wb = ws_open.spreadsheet
         try:
             ws_closed = wb.worksheet("trades_closed")
         except:
