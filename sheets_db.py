@@ -4,6 +4,8 @@ import pandas as pd
 import streamlit as st
 import datetime
 
+import os
+
 # --- CONFIG ---
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 SHEET_NAME = "Swing_Trades_DB"
@@ -22,13 +24,22 @@ def test_connection():
 def connect_db():
     """Connects to Google Sheets using Streamlit Secrets (Cloud) or Local File."""
     try:
+        creds = None
         # 1. Try Streamlit Secrets (Cloud / Best Practice)
         if "gcp_service_account" in st.secrets:
              creds_dict = st.secrets["gcp_service_account"]
              creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-        else:
-             # 2. Fallback to Local File
+        # 2. Try Environment Variable (GitHub Actions / Dotenv)
+        elif "GCP_SERVICE_ACCOUNT" in os.environ:
+             import json
+             creds_dict = json.loads(os.environ["GCP_SERVICE_ACCOUNT"])
+             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+        elif os.path.exists(CREDENTIALS_FILE):
+             # 3. Fallback to Local File
              creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, SCOPE)
+        else:
+             print("❌ Connection Error: No credentials found. Checked 'st.secrets' and 'service_account.json'.")
+             return None
              
         client = gspread.authorize(creds)
         sheet = client.open(SHEET_NAME)
@@ -36,21 +47,26 @@ def connect_db():
         # Try to open "OpenPositions" tab, create if missing
         try:
             worksheet = sheet.worksheet("OpenPositions")
-            # --- SCHEMA CHECK (Auto-Heal) ---
-            # Ensure TQS header exists (Col 11)
-            try:
-                if worksheet.cell(1, 11).value != "TQS":
-                    worksheet.update_cell(1, 11, "TQS")
-                    if worksheet.cell(1, 1).value != "Date": worksheet.update_cell(1, 1, "Date")
-            except:
-                worksheet.update_cell(1, 11, "TQS")
-        except:
+        except gspread.exceptions.WorksheetNotFound:
             worksheet = sheet.add_worksheet(title="OpenPositions", rows=100, cols=11)
             worksheet.append_row(["Date", "Symbol", "Entry", "Qty", "StopLoss", "Status", "LTP", "PnL_Pct", "ExitPrice", "ExitDate", "TQS"])
+        
+        # --- SCHEMA CHECK (Auto-Heal) ---
+        # Ensure TQS header exists (Col 11)
+        try:
+             if worksheet.cell(1, 11).value != "TQS":
+                 worksheet.update_cell(1, 11, "TQS")
+                 if worksheet.cell(1, 1).value != "Date": worksheet.update_cell(1, 1, "Date")
+        except Exception as e:
+             # This might fail if sheet is empty, safe to ignore or log
+             print(f"⚠️ Schema Check Warning: {e}")
             
         return worksheet
     except Exception as e:
-        # print(f"DB Error: {e}") # Silent fail to avoid UI clutter, or use st.error if debugging
+        print(f"❌ DB Error: {e}") 
+        return None
+    except Exception as e:
+        print(f"❌ DB Error: {e}") 
         return None
 
 def fetch_portfolio():
@@ -162,9 +178,9 @@ def save_scan_results(results):
         print(f"Error saving scan: {e}")
 
 def fetch_scan_results():
-    """Reads 'LatestScan'."""
+    """Reads 'LatestScan'. Returns (data, updated_at, error_msg)."""
     ws = connect_db()
-    if not ws: return [], None
+    if not ws: return [], None, "DB Connection Failed"
     
     try:
         wb = ws.client.open(SHEET_NAME)
@@ -176,9 +192,9 @@ def fetch_scan_results():
         if data:
             updated_at = data[0].get('Updated', 'Unknown')
             
-        return data, updated_at
-    except:
-        return [], None
+        return data, updated_at, None
+    except Exception as e:
+        return [], None, str(e)
 
 def archive_trade(trade_data):
     """Log closed trade to 'trades_closed'"""

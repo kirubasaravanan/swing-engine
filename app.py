@@ -101,12 +101,15 @@ if 'scan_results' not in st.session_state:
     st.session_state['scan_results'] = []
     # Try Load from DB
     import sheets_db
-    cached_res, updated_at = sheets_db.fetch_scan_results()
+    cached_res, updated_at, err_msg = sheets_db.fetch_scan_results()
+    
     if cached_res:
         st.session_state['scan_results'] = cached_res
         st.session_state['last_update'] = updated_at
     else:
         st.session_state['last_update'] = None
+        if err_msg:
+             st.session_state['db_error'] = err_msg
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -136,6 +139,8 @@ with st.sidebar:
         st.caption(f"Last Bot Scan: {st.session_state['last_update']}")
     else:
         st.caption("🔴 Bot Data: Waiting for first run...")
+        if 'db_error' in st.session_state:
+            st.error(f"DB Load Failed: {st.session_state['db_error']}")
         
     with st.expander("🔌 Connection Status"):
         if st.button("Test DB Connection"):
