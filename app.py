@@ -136,7 +136,16 @@ with st.sidebar:
         st.caption(f"Last Bot Scan: {st.session_state['last_update']}")
     else:
         st.caption("🔴 Bot Data: Waiting for first run...")
-    
+        
+    with st.expander("🔌 Connection Status"):
+        if st.button("Test DB Connection"):
+            import sheets_db
+            success, msg = sheets_db.test_connection()
+            if success:
+                st.success(msg)
+            else:
+                st.error(msg)
+                
     if st.button("RUN SCAN 🚀", type="primary"):
         with st.spinner("Crunching Live Data..."):
             results = st.session_state['engine'].scan()

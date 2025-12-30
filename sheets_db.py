@@ -9,6 +9,16 @@ SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/au
 SHEET_NAME = "Swing_Trades_DB"
 CREDENTIALS_FILE = "service_account.json"
 
+def test_connection():
+    """Returns (Success: bool, Message: str)"""
+    try:
+        ws = connect_db()
+        if not ws:
+             return False, "Failed to connect (Check Logs/Secrets)"
+        return True, "Connected to Google Sheets ✅"
+    except Exception as e:
+        return False, str(e)
+
 def connect_db():
     """Connects to Google Sheets using Streamlit Secrets (Cloud) or Local File."""
     try:
