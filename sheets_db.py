@@ -3,247 +3,276 @@ from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 import streamlit as st
 import datetime
-
+import json
 import os
 
 # --- CONFIG ---
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 SHEET_NAME = "Swing_Trades_DB"
 CREDENTIALS_FILE = "service_account.json"
+DB_FILE = "db.json"
 
-def test_connection():
-    """Returns (Success: bool, Message: str)"""
-    try:
-        ws = connect_db()
-        if not ws:
-             return False, "Failed to connect (Check Logs/Secrets)"
-        return True, "Connected to Google Sheets ✅"
-    except Exception as e:
-        return False, str(e)
-
-@st.cache_resource(ttl=600)
+# --- CORE CONNECTION ---
 def connect_db():
-    """Connects to Google Sheets using Streamlit Secrets (Cloud) or Local File."""
-    # NO COMPREHENSIVE TRY/EXCEPT HERE
-    # Reasons: 
-    # 1. cached_resource will cache 'None' if we handle the error and return None.
-    # 2. We want it to FAIL so it retries next time or shows the error trace.
-    
+    """Connects to Google Sheets (Cloud)."""
     creds = None
-    # 1. Try Streamlit Secrets (Cloud / Best Practice)
     if "gcp_service_account" in st.secrets:
             creds_dict = st.secrets["gcp_service_account"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-    # 2. Try Environment Variable (GitHub Actions / Dotenv)
     elif "GCP_SERVICE_ACCOUNT" in os.environ:
-            import json
-            creds_dict = json.loads(os.environ["GCP_SERVICE_ACCOUNT"])
+            import json as j
+            creds_dict = j.loads(os.environ["GCP_SERVICE_ACCOUNT"])
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
     elif os.path.exists(CREDENTIALS_FILE):
-            # 3. Fallback to Local File
             creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, SCOPE)
     else:
-            # Raise exception so it's not cached as None
-            available_secrets = list(st.secrets.keys()) if hasattr(st, 'secrets') else "No st.secrets"
-            raise ConnectionError(f"No credentials found. Env: {os.environ.keys()}, Secrets: {available_secrets}")
+            return None # Fail silently, let caller handle
             
     client = gspread.authorize(creds)
-    sheet = client.open(SHEET_NAME)
-    
-    # Try to open "OpenPositions" tab, create if missing
     try:
-        worksheet = sheet.worksheet("OpenPositions")
-    except gspread.exceptions.WorksheetNotFound:
-        worksheet = sheet.add_worksheet(title="OpenPositions", rows=100, cols=11)
-        worksheet.append_row(["Date", "Symbol", "Entry", "Qty", "StopLoss", "Status", "LTP", "PnL_Pct", "ExitPrice", "ExitDate", "TQS"])
-    
-    # --- SCHEMA CHECK (Auto-Heal) ---
-    # Ensure TQS header exists (Col 11)
+        sheet = client.open(SHEET_NAME)
+        # Verify Worksheet Existence
+        try: sheet.worksheet("OpenPositions")
+        except: pass
+        return sheet
+    except:
+        return None
+
+# --- LOCAL DATABASE LAYER ---
+def load_local_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except: return {}
+    return {}
+
+import json
+import numpy as np
+import pandas as pd
+
+class SafeJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, pd.Series):
+            try: return float(obj.iloc[-1]) # Try to get scalar
+            except: return str(obj) # Fallback to string repr
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+def save_local_db(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=4, cls=SafeJSONEncoder)
+
+# --- SYNC STACK ---
+def sync_from_cloud():
+    """Downloads ALL data from Cloud -> Local db.json"""
+    conn = connect_db()
+    if not conn: return False, "Connection Failed"
+
     try:
-            if worksheet.cell(1, 11).value != "TQS":
-                worksheet.update_cell(1, 11, "TQS")
-                if worksheet.cell(1, 1).value != "Date": worksheet.update_cell(1, 1, "Date")
-    except Exception as e:
-            # This might fail if sheet is empty, safe to ignore or log
-            print(f"⚠️ Schema Check Warning: {e}")
+        wb = conn
         
-    return worksheet
+        # 1. Portfolio
+        try: ws_p = wb.worksheet("OpenPositions")
+        except: ws_p = wb.add_worksheet("OpenPositions", 100, 10)
+        portfolio = ws_p.get_all_records()
+        
+        # 2. History
+        try: ws_h = wb.worksheet("trades_closed")
+        except: ws_h = wb.add_worksheet("trades_closed", 1000, 10)
+        history = ws_h.get_all_records()
+        
+        # 3. Scans
+        try: ws_s = wb.worksheet("LatestScan")
+        except: ws_s = wb.add_worksheet("LatestScan", 100, 15)
+        scans = ws_s.get_all_records()
+        
+        db = {
+            "portfolio": portfolio,
+            "history": history,
+            "scan_results": scans,
+            "last_synced": str(datetime.datetime.now())
+        }
+        
+        # Preserve Watchlist (Local Only for now)
+        local_db = load_local_db()
+        if "watchlist" in local_db:
+            db["watchlist"] = local_db["watchlist"]
+        else:
+            db["watchlist"] = []
+
+        save_local_db(db)
+        return True, "Synced Successfully"
+    except Exception as e:
+        return False, str(e)
+
+def push_portfolio_to_cloud(portfolio_data):
+    """Overwrites OpenPositions in Cloud with Local Data."""
+    try:
+        wb = connect_db()
+        ws = wb.worksheet("OpenPositions")
+        ws.clear()
+        
+        if portfolio_data:
+            headers = list(portfolio_data[0].keys())
+            ws.append_row(headers)
+            rows = [list(x.values()) for x in portfolio_data]
+            ws.append_rows(rows)
+        return True
+    except: return False
+
+# --- READ METHODS (INSTANT) ---
 
 def fetch_portfolio():
-    """Fetches all OPEN positions."""
-    try:
-        ws = connect_db()
-    except:
-        return []
-    if not ws: return []
-    
-    data = ws.get_all_records()
-    df = pd.DataFrame(data)
-    
-    if df.empty: return []
-    
-    if "Status" in df.columns:
-        open_trades = df[df["Status"] == "OPEN"].to_dict('records')
-        return open_trades
-    return []
+    db = load_local_db()
+    if db: return db.get("portfolio", [])
+    # Fallback to cloud if no local db
+    sync_from_cloud()
+    return load_local_db().get("portfolio", [])
 
 def fetch_history():
-    """Fetches CLOSED trades."""
-    try:
-        ws_open = connect_db()
-    except:
-        return []
-    if not ws_open: return []
-    
-    try:
-        wb = ws_open.spreadsheet
-        ws = wb.worksheet("trades_closed")
-        data = ws.get_all_records()
-        return data
-    except:
-        return []
-
-def add_trade(symbol, entry, qty=1, stop=0, tqs=0):
-    """Adds a new trade."""
-    try:
-        ws = connect_db()
-    except:
-        return False
-    if not ws: return False
-    
-    date_str = datetime.date.today().strftime("%Y-%m-%d")
-    # Date, Symbol, Entry, Qty, StopLoss, Status, LTP, PnL_Pct, ExitPrice, ExitDate, TQS
-    row = [date_str, symbol, entry, qty, stop, "OPEN", entry, 0.0, "", "", tqs]
-    try:
-        ws.append_row(row)
-        return True
-    except:
-        return False
-
-def close_trade_db(symbol, exit_price):
-    """Marks a trade as CLOSED."""
-    try:
-        ws = connect_db()
-    except:
-        return False
-    if not ws: return False
-    
-    # Find the row
-    cell = ws.find(symbol)
-    if cell:
-        # Update Status (Col 6), ExitPrice (Col 9), ExitDate (Col 10)
-        # Note: gspread is 1-indexed
-        r = cell.row
-        # Check if it's actually OPEN
-        status = ws.cell(r, 6).value
-        if status == "OPEN":
-            ws.update_cell(r, 6, "CLOSED")
-            ws.update_cell(r, 9, exit_price)
-            ws.update_cell(r, 10, datetime.date.today().strftime("%Y-%m-%d"))
-            return True
-    return False
-
-def delete_trade(symbol):
-    """Deletes a trade from OpenPositions (Recycling slot)."""
-    try:
-        ws = connect_db()
-    except:
-        return
-    if not ws: return
-    
-    try:
-        cell = ws.find(symbol)
-        ws.delete_rows(cell.row)
-        print(f"♻️ Recycled Slot: {symbol} removed.")
-    except:
-        print(f"⚠️ Could not delete {symbol}")
-
-def save_scan_results(results):
-    """Overwrites 'LatestScan' with fresh data."""
-    if not results: return
-    try:
-        ws = connect_db()
-    except:
-        print("Save Error: Connection Failed")
-        return
-    if not ws: return
-    
-    try:
-        wb = ws.spreadsheet
-        try:
-            worksheet = wb.worksheet("LatestScan")
-            worksheet.clear()
-        except:
-            worksheet = wb.add_worksheet(title="LatestScan", rows=100, cols=20)
-            
-        # Headers
-        headers = ["Symbol", "Price", "Change", "Weekly %", "RSI", "CHOP", "TQS", "RevTQS", "Type", "Stop", "Entry", "Confidence", "Updated"]
-        worksheet.append_row(headers)
-        
-        # Prepare Rows
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        rows = []
-        for r in results:
-            rows.append([
-                r['Symbol'], r['Price'], r['Change'], r.get('Weekly %', 0.0), r['RSI'], r.get('CHOP', 0), 
-                r['TQS'], r.get('RevTQS', 0), r['Type'], r['Stop'], r['Entry'], r['Confidence'], timestamp
-            ])
-            
-        worksheet.append_rows(rows)
-        print(f"Saved {len(rows)} scan results to DB.")
-    except Exception as e:
-        print(f"Error saving scan: {e}")
+    db = load_local_db()
+    if db: return db.get("history", [])
+    sync_from_cloud()
+    return load_local_db().get("history", [])
 
 def fetch_scan_results():
-    """Reads 'LatestScan'. Returns (data, updated_at, error_msg)."""
-    try:
-        ws = connect_db()
-    except Exception as e:
-        return [], None, f"DB Connection Failed: {e}"
-    if not ws: return [], None, "DB Connection Failed"
+    db = load_local_db()
     
-    try:
-        wb = ws.spreadsheet
-        worksheet = wb.worksheet("LatestScan")
-        data = worksheet.get_all_records()
+    # Auto-healing: If no DB, sync first.
+    if not db:
+        sync_from_cloud()
+        db = load_local_db()
         
-        # Get timestamp from first row if exists
-        updated_at = "Unknown"
-        if data:
-            updated_at = data[0].get('Updated', 'Unknown')
-            
-        return data, updated_at, None
-    except Exception as e:
-        return [], None, str(e)
+    if db:
+        return db.get("scan_results", []), db.get("last_synced", "Now"), None
+    return [], None, "No Data"
+
+# --- WRITE METHODS (SAFE) ---
+
+def add_trade(symbol, entry, qty=1, stop=0, tqs=0):
+    # 1. Update Local
+    db = load_local_db()
+    if not db: sync_from_cloud(); db = load_local_db()
+    
+    new_row = {
+        "Date": datetime.date.today().strftime("%Y-%m-%d"),
+        "Symbol": symbol, "Entry": entry, "Qty": qty, "StopLoss": stop,
+        "Status": "OPEN", "LTP": entry, "PnL_Pct": 0.0, "ExitPrice": "", "ExitDate": "", "TQS": tqs
+    }
+    db["portfolio"].append(new_row)
+    save_local_db(db)
+    
+    # 2. Push Cloud (Background Sync)
+    push_portfolio_to_cloud(db["portfolio"])
+    return True
+
+
+# --- WATCHLIST METHODS ---
+def fetch_watchlist():
+    db = load_local_db()
+    return db.get("watchlist", [])
+
+def save_watchlist(data):
+    db = load_local_db()
+    db["watchlist"] = data
+    save_local_db(db)
+
+def delete_trade(symbol):
+    # 1. Update Local (Precise List Remove)
+    db = load_local_db()
+    if not db: return
+    
+    init_len = len(db["portfolio"])
+    # Filter out by symbol
+    db["portfolio"] = [t for t in db["portfolio"] if t["Symbol"] != symbol]
+    
+    if len(db["portfolio"]) < init_len:
+        save_local_db(db)
+        # 2. Push Cloud (Overwrite = No 'wrong row' errors)
+        push_portfolio_to_cloud(db["portfolio"])
+        print(f"Deleted {symbol} local & cloud.")
+
+def close_trade_db(symbol, exit_price):
+    # This was missing in replacement - needed for exit
+    db = load_local_db()
+    if not db: return False
+    
+    # Find & Update Local
+    found = False
+    for t in db["portfolio"]:
+        if t['Symbol'] == symbol and t['Status'] == 'OPEN':
+             t['Status'] = 'CLOSED'
+             t['ExitPrice'] = exit_price
+             t['ExitDate'] = datetime.date.today().strftime("%Y-%m-%d")
+             found = True
+             break
+             
+    if found:
+        # We don't save closed trades in Portfolio list permanently?
+        # Actually logic is Archive saves to history. Here we just update?
+        # No, usually we delete from portfolio and add to history.
+        # But for 'close_trade_db' returning True lets UI handle it.
+        # Let's save the logic.
+        save_local_db(db)
+        return True
+    return False
 
 def archive_trade(trade_data):
-    """Log closed trade to 'trades_closed'"""
-    try:
-        ws_open = connect_db() 
-    except:
-        return False
-    if not ws_open: return False
+    # 1. Update Local
+    db = load_local_db()
+    if not db: sync_from_cloud(); db = load_local_db()
     
+    db["history"].append(trade_data)
+    save_local_db(db)
+    
+    # 2. Append to Cloud (Optimized: Just append row)
     try:
-        wb = ws_open.spreadsheet
-        try:
-            ws_closed = wb.worksheet("trades_closed")
-        except:
-            ws_closed = wb.add_worksheet("trades_closed", rows=1000, cols=10)
-            ws_closed.append_row(["Date", "Symbol", "Entry", "Exit", "PnL", "Reason"])
-            
-        # Data: [Date, Symbol, Entry, Exit, PnL, Reason]
-        ws_closed.append_row([
+        wb = connect_db()
+        ws = wb.worksheet("trades_closed")
+        row = [
             trade_data.get('Date', ''),
             trade_data.get('Symbol', ''),
             trade_data.get('Entry', 0),
             trade_data.get('Exit', 0),
             trade_data.get('PnL', 0),
-            trade_data.get('Reason', 'AUTO')
-        ])
-        return True
-    except Exception as e:
-        print(f"Archive Error: {e}")
-        return False
+            trade_data.get('Reason', 'Manual')
+        ]
+        ws.append_row(row)
+    except: pass
+
+def save_scan_results(results):
+    # 1. Local
+    db = load_local_db()
+    if not db: 
+        db = {"portfolio": [], "history": [], "scan_results": []}
+    
+    db["scan_results"] = results
+    db["last_synced"] = str(datetime.datetime.now())
+    save_local_db(db)
+    
+    # 2. Cloud
+    try:
+        wb = connect_db()
+        try: ws = wb.worksheet("LatestScan")
+        except: ws = wb.add_worksheet("LatestScan", 100, 15)
+        ws.clear()
+        
+        if results:
+            headers = list(results[0].keys())
+            ws.append_row(headers)
+            rows = [list(r.values()) for r in results]
+            ws.append_rows(rows)
+    except: pass
+    
+def test_connection():
+    try:
+        if connect_db(): return True, "Connected (Cloud + Local Active)"
+        return False, "Failed"
+    except Exception as e: return False, str(e)

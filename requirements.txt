@@ -1,7 +1,11 @@
 streamlit
 pandas
-yfinance
 numpy
 requests
 gspread
 oauth2client
+smartapi-python
+pyotp
+python-dotenv
+logzero
+websocket-client

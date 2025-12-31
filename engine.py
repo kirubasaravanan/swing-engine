@@ -1,4 +1,3 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
@@ -25,40 +24,68 @@ class SwingEngine:
             self.universe = [t if ".NS" in t else f"{t}.NS" for t in tickers]
 
     def fetch_data(self):
-        """Fetch Multi-Timeframe Batch Data (15m, 1h, 1d)"""
+        """Fetch Multi-Timeframe Batch Data (15m, 1h, 1d) via Market Data Engine"""
+        import market_data
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
         if not self.universe: return {}
         
-        print(f"Fetching Multi-TF data for {len(self.universe)} stocks...")
+        max_workers = 4
+        print(f"Fetching Data for {len(self.universe)} stocks (Parallel {max_workers} Threads)...")
         tickers = self.universe
         
-        data_map = {}
+        # Prepare containers (using dict of DF instead of MultiIndex DF for better stability)
+        # Note: DOWNSTREAM compatibility -> scan() iterates tickers. 
+        # If we return a dict of {ticker: df}, scan logic needs to support it.
+        # Currently scan() likely iterates tickers and expects to slice a Batch DF.
+        # Let's see...
+        # scan() extracts using: if sym in raw_data: df_tick = raw_data[sym]
+        # Providing a dict {'1d': {'RELIANCE.NS': DF, ...}} matches that access pattern perfectly!
         
-        try:
-            # 1. Daily (3mo) for Trend & Weekly Gain
-            print(".. Downloading Daily Data")
-            d_1d = yf.download(tickers, period="3mo", interval="1d", group_by='ticker', progress=False, threads=True)
-            data_map['1d'] = d_1d
+        data_map = {'1d': {}, '1h': {}, '15m': {}}
+        
+        def fetch_worker(sym):
+            try:
+                # 3 Calls per ticker? That's heavy (750 calls).
+                # Optimization: 
+                # 1. Fetch 1D (Trend) - 3mo
+                # 2. Fetch 1H (TQS) - 1mo
+                # 3. Fetch 15m (Entry) - 5d
+                # We thread this to maximize throughput (~3 req/sec limit)
+                
+                # Note: market_data.incremental_fetch handles cache/angel transparently
+                d1 = market_data.incremental_fetch(sym, interval="1d", period="3mo")
+                d1h = market_data.incremental_fetch(sym, interval="1h", period="1mo")
+                d15 = market_data.incremental_fetch(sym, interval="15m", period="5d")
+                return sym, d1, d1h, d15
+            except:
+                return sym, None, None, None
+
+        # Execute Parallel Fetch (Limit 5 threads to avoid rate limit spam)
+        # Angel Limit: 3 requests per second. 
+        # With 5 threads doing 3 calls each = 15 calls. Might hit rate limit.
+        # Let's stick to 2 threads or add sleep.
+        # SmartApi python wrapper handles some retries? No.
+        # We'll rely on our AG8001 retry logic + rate limiting.
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # Submit all
+            futures = {executor.submit(fetch_worker, t): t for t in tickers}
             
-            # 2. Hourly (1mo) for TQS Core (RSI, Vol, Chop)
-            print(".. Downloading Hourly Data")
-            d_1h = yf.download(tickers, period="1mo", interval="1h", group_by='ticker', progress=False, threads=True)
-            data_map['1h'] = d_1h
-            
-            # 3. 15-Min (5d) for Entry Timing
-            print(".. Downloading 15m Data")
-            d_15m = yf.download(tickers, period="5d", interval="15m", group_by='ticker', progress=False, threads=True)
-            data_map['15m'] = d_15m
-            
-            return data_map
-        except Exception as e:
-            print(f"Fetch Error: {e}")
-            return {}
+            for future in as_completed(futures):
+                sym, d1, d1h, d15 = future.result()
+                if d1 is not None and not d1.empty: data_map['1d'][sym] = d1
+                if d1h is not None and not d1h.empty: data_map['1h'][sym] = d1h
+                if d15 is not None and not d15.empty: data_map['15m'][sym] = d15
+
+        return data_map
 
     def calculate_indicators(self, df):
         """Add Technicals (EMA, RSI, MACD)"""
         if df.empty: return None
         
         # Ensure single level column if series
+        df = df.copy() # Critial Fix for Data Leaking
         try:
             # EMA
             df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
@@ -102,9 +129,18 @@ class SwingEngine:
             range_14 = high_14 - low_14
             sum_tr_14 = df['TR'].rolling(window=14).sum()
             
-            # Use log10 from numpy
-            # Avoid division by zero
-            df['CHOP'] = 100 * np.log10(sum_tr_14 / range_14) / np.log10(14)
+            # Avoid Division by Zero & Invalid Log inputs
+            # Replace 0 range with NaN or small epsilon
+            range_14 = range_14.replace(0, np.nan) 
+            
+            ratio = sum_tr_14 / range_14
+            df['CHOP'] = 100 * np.log10(ratio) / np.log10(14)
+            
+            # Fill NaNs (first 14 rows) with 50 (Neutral)
+            df['CHOP'] = df['CHOP'].fillna(50)
+            
+            # Handle Infinite?
+            df['CHOP'] = df['CHOP'].replace([np.inf, -np.inf], 50)
             
             return df
         except Exception as e:
@@ -112,17 +148,21 @@ class SwingEngine:
             return None
 
     def get_live_price(self, symbol):
-        """Fetches the latest close price for a single symbol."""
+        """Fetches the latest close price for a single symbol via Angel One."""
         try:
-            df = yf.download(symbol, period="1d", interval="1m", progress=False)
-            if not df.empty:
-                # Handle MultiIndex if present
-                if isinstance(df.columns, pd.MultiIndex):
-                     return df['Close'].iloc[-1].values[0]
-                return df['Close'].iloc[-1]
+             import streamlit as st
+             if 'angel_mgr' in st.session_state:
+                 mgr = st.session_state.angel_mgr
+                 # Fetch 1 day, 1m interval to get latest
+                 # Or use specific "LTP" API if available? 
+                 # Candle is safer for consistency
+                 df = mgr.fetch_hist_data(symbol, interval="ONE_MINUTE", days=2)
+                 if df is not None and not df.empty:
+                     return df['Close'].iloc[-1]
+             return 0.0
         except:
-            return None
-        return None
+            return 0.0
+        return 0.0
 
     def calculate_tqs_multi_tf(self, df_15m, df_1h, df_1d):
         """
@@ -293,13 +333,22 @@ class SwingEngine:
         Check existing positions for Exit Signals.
         positions_df: DataFrame with ['Symbol', 'Entry']
         """
-        data_map = self.fetch_data() # Returns dict {'15m':..., '1h':...}
+        # Optimize: Only fetch data for portfolio stocks
+        unique_tickers = []
+        if 'Symbol' in positions_df.columns:
+            raw_syms = positions_df['Symbol'].unique()
+            # Ensure proper format (append .NS if missing, or handle both?)
+            # The fetcher expects .NS usually for Yahoo
+            unique_tickers = [s + ".NS" if ".NS" not in s else s for s in raw_syms]
+
+        # Fetch Limited Data (Instant Sequential Fetch)
+        data_map = self.fetch_data(limit_to_tickers=unique_tickers)
         if not data_map: return []
         
         # Use 1H data for Exits (Dynamic) or 1D for Trend?
         # Let's use 1H for granular exits (RSI > 75 etc)
         raw_data = data_map.get('1h')
-        if raw_data is None or raw_data.empty: return []
+        if not raw_data: return []
         
         exits = []
         
@@ -323,18 +372,44 @@ class SwingEngine:
             except: return None
 
         for idx, row in positions_df.iterrows():
-            sym = row['Symbol'] + ".NS"
+            raw_sym = row['Symbol']
+            # Ensure .NS consistency
+            sym = raw_sym + ".NS" if ".NS" not in raw_sym else raw_sym
+            clean_sym = raw_sym.replace(".NS", "")
+            
             entry = float(row['Entry'])
             
-            df_tick = get_df_tick(raw_data, sym)
+            # Try finding in batch data using both formats
+            df_tick = None
+            if raw_data is not None:
+                # Try Keys: "RELIANCE.NS", "RELIANCE", "REL..."
+                if sym in raw_data: df_tick = raw_data[sym]
+                elif clean_sym in raw_data: df_tick = raw_data[clean_sym]
+                # If raw_data is MultiIndex DataFrame (from batch download)
+                elif isinstance(raw_data.columns, pd.MultiIndex):
+                     try: df_tick = raw_data.xs(sym, axis=1, level=0)
+                     except: 
+                        try: df_tick = raw_data.xs(clean_sym, axis=1, level=0)
+                        except: pass
             
+            # Fallback: Force Download (Angel One)
             if df_tick is None or df_tick.empty:
-                 # Fallback: Try fetch single
                  try: 
-                     df_tick = yf.download(sym, period="60d", progress=False)
+                     if 'angel_mgr' in st.session_state:
+                         mgr = st.session_state.angel_mgr
+                         # Fetch 5 days history for fallback
+                         df_tick = mgr.fetch_hist_data(sym, interval="ONE_HOUR", days=5)
                  except: continue
             
             if df_tick is None or df_tick.empty: continue
+            
+            # DEBUG: Trace Data Source
+            try:
+                # Get scalar close properly to avoid ambiguity
+                last_price = df_tick['Close'].iloc[-1]
+                if isinstance(last_price, pd.Series): last_price = last_price.iloc[0]
+                print(f"Set: {sym} | Source: {'Cache' if sym in raw_data else 'Download'} | Price: {float(last_price)}")
+            except Exception as e: print(f"Debug Err: {e}")
 
             # FLATTEN COLUMNS (Critical Fix)
             # yfinance returns MultiIndex (Price, Ticker) or (Ticker, Price)
@@ -449,55 +524,97 @@ class SwingEngine:
         except: return 0
         return max(min(score, 10), 0)
 
-    def get_weekly_rankings(self, d_1d):
+    def fetch_data(self, limit_to_tickers=None):
         """
-        Compute top weekly gainers from Daily Data.
-        Returns: Dict {Symbol: {'Rank': 1, 'Percent': 15.2, 'Category': 'MIDCAP'}}
+        Fetch Multi-Timeframe Data.
+        limit_to_tickers: Optional list of specific symbols to fetch (e.g. for Portfolio).
+        """
+        if not self.universe and not limit_to_tickers: return {}
+        
+        import market_data
+        
+        # Determine scope
+        tickers = limit_to_tickers if limit_to_tickers else self.universe
+        # Ensure unique and formatted (roughly) if needed
+        tickers = list(set(tickers))
+        
+        print(f"⚡ Fetching Data for {len(tickers)} stocks (Sequential + Parquet)...")
+        
+        results = {'1d': {}, '1h': {}, '15m': {}}
+        
+        def fetch_ticker_tfs(ticker):
+            # Fetch all 3 timeframes for one ticker
+            try:
+                # 1D: Need large history for trend/weekly (3mo is safe default for fetch, cache handles it)
+                d1 = market_data.incremental_fetch(ticker, "1d", "1y") # 1y for robust daily
+                
+                # 1H: Need 1mo for Chop/RSI
+                h1 = market_data.incremental_fetch(ticker, "1h", "1mo")
+                
+                # 15M: Need 5d for Entry
+                m15 = market_data.incremental_fetch(ticker, "15m", "5d")
+                
+                return ticker, d1, h1, m15
+            except:
+                return ticker, None, None, None
+
+        # SEQUENTIAL EXECUTION (Fixes Data Leak & Race Conditions)
+        for t in tickers:
+             tic, d1, h1, m15 = fetch_ticker_tfs(t)
+             if d1 is not None and not d1.empty: results['1d'][tic] = d1
+             if h1 is not None and not h1.empty: results['1h'][tic] = h1
+             if m15 is not None and not m15.empty: results['15m'][tic] = m15
+
+        print(f"⚡ Data Loaded. 1D: {len(results['1d'])} | 1H: {len(results['1h'])} | 15M: {len(results['15m'])}")
+        return results
+
+    def get_weekly_rankings(self, d_1d_dict):
+        """
+        Compute top weekly gainers from Daily Data Dict.
+        d_1d_dict: {Symbol: DataFrame}
         """
         rankings = []
         
-        # Helper to categorize
         def get_cat(sym):
-            s = sym if ".NS" in sym else sym + ".NS"
-            return self.category_map.get(s, "Total Market")
+            return self.category_map.get(sym, "Total Market")
 
-        # Dynamic Ticker Level Detection
-        tickers = []
-        ticker_level = 0
-        
-        if isinstance(d_1d.columns, pd.MultiIndex):
-            # Try to find which level looks like a Ticker (string, contains .NS or is upper)
-            # Usually Level 0 is Ticker for group_by='ticker'
-            # But yfinance changed recently to (Price, Ticker) sometimes.
-            
-            l0 = d_1d.columns.get_level_values(0)
-            l1 = d_1d.columns.get_level_values(1) if d_1d.columns.nlevels > 1 else []
-            
-            if len(l0) > 0 and ".NS" in str(l0[0]):
-                ticker_level = 0
-                tickers = l0.unique()
-            elif len(l1) > 0 and ".NS" in str(l1[0]):
-                ticker_level = 1
-                tickers = l1.unique()
-            elif len(l0) > 0 and str(l0[0]).isupper() and "CLOSE" not in str(l0[0]).upper():
-                 # Maybe tickers without .NS
-                 ticker_level = 0
-                 tickers = l0.unique()
-            else:
-                 # Fallback: Assume Level 0 if not Price
-                 ticker_level = 0
-                 tickers = l0.unique()
-        else:
-             return {}
-
-        for ticker in tickers:
+        for ticker, df in d_1d_dict.items():
             try:
-                # Robust extract
-                df = d_1d.xs(ticker, axis=1, level=ticker_level)
-                if len(df) < 6: continue
+                if df is None or df.empty or len(df) < 6: continue
                 
-                curr = df['Close'].iloc[-1]
-                week_ago = df['Close'].iloc[-6] 
+                # Cleaning: Flatten MultiIndex Columns if present
+                if isinstance(df.columns, pd.MultiIndex):
+                    # Attempt to simplify columns to Single Level
+                    try:
+                        # Assuming Level 0 is Ticker or Price?
+                        # If we have (Ticker, Price) -> Level 1 is Price
+                        # If we have (Price, Ticker) -> Level 0 is Price
+                        # Let's try to find 'Close' in strings
+                        pass # Rely on xs or get_level_values
+                        df.columns = df.columns.get_level_values(0)
+                    except: pass
+                
+                # Fallback: If columns are tuples, map to string
+                if not df.empty and isinstance(df.columns[0], tuple):
+                     df.columns = [str(c[0]) for c in df.columns]
+
+                # Extract Close
+                try:
+                    vals = df['Close'].values
+                except:
+                    # Try finding column that contains "Close"
+                    cols = [c for c in df.columns if "Close" in str(c)]
+                    if not cols: continue
+                    vals = df[cols[0]].values
+                
+                if vals.ndim > 1: vals = vals[:, 0]
+                if len(vals) < 6: continue
+                
+                curr = float(vals[-1])
+                week_ago = float(vals[-6])
+                
+                if week_ago == 0: continue
+                
                 pct = ((curr - week_ago) / week_ago) * 100
                 
                 rankings.append({
@@ -505,13 +622,11 @@ class SwingEngine:
                     'Percent': pct,
                     'Category': get_cat(ticker)
                 })
-            except: continue
+            except Exception: 
+                continue
             
-        # Sort
         rankings.sort(key=lambda x: x['Percent'], reverse=True)
         
-        # Convert to Map for O(1) Lookup
-        # We only care about Top 20 for highlighting
         rank_map = {}
         for i, r in enumerate(rankings):
             clean_sym = r['Symbol'].replace(".NS", "")
@@ -523,16 +638,16 @@ class SwingEngine:
         return rank_map
 
     def scan(self, progress_callback=None):
-        """Main Scan Loop (Multi-Timeframe)"""
-        if progress_callback: progress_callback(0.05) # 5% - Reading Config
+        """Main Scan Loop (Optimized for Dictionary Data)"""
+        if progress_callback: progress_callback(0.05)
         
-        # 1. Fetch ALL Data
+        # 1. Fetch ALL Data (Dict of Dicts)
         data_map = self.fetch_data()
         if not data_map: return []
         
-        d_15m = data_map.get('15m')
-        d_1h = data_map.get('1h')
-        d_1d = data_map.get('1d')
+        d_1d = data_map.get('1d', {})
+        d_1h = data_map.get('1h', {})
+        d_15m = data_map.get('15m', {})
         
         # --- PRE-CALCULATE WEEKLY RANKINGS ---
         weekly_map = self.get_weekly_rankings(d_1d)
@@ -541,46 +656,32 @@ class SwingEngine:
         tickers = self.universe
         total_tickers = len(tickers)
         
-        # Helper to extract single stock DF from batch
-        def get_df(batch_data, tic):
-            try:
-                if isinstance(batch_data.columns, pd.MultiIndex):
-                    # Level 0 is usually Ticker if group_by='ticker'
-                    return batch_data.xs(tic, axis=1, level=0).copy()
-                return None
-            except: return None
-
         for i, ticker in enumerate(tickers):
-            if progress_callback:
-                try:
-                    p = 0.10 + (0.90 * (i + 1) / total_tickers)
-                    progress_callback(p)
+            if progress_callback and i % 10 == 0:
+                try: progress_callback(0.10 + (0.90 * (i + 1) / total_tickers))
                 except: pass
 
             try:
-                # Extract 3 Timeframes
-                df_15 = get_df(d_15m, ticker)
-                df_60 = get_df(d_1h, ticker)
-                df_day = get_df(d_1d, ticker)
+                # Direct Dict Lookup (O(1))
+                df_day = d_1d.get(ticker)
+                df_60 = d_1h.get(ticker)
+                df_15 = d_15m.get(ticker)
                 
-                if df_15 is None or df_60 is None or df_day is None: continue
-                if df_day.empty or len(df_day) < 20: continue 
+                if df_day is None or df_60 is None or df_15 is None: continue
+                if len(df_day) < 20: continue
                 
-                df_15.dropna(subset=['Close'], inplace=True)
-                df_60.dropna(subset=['Close'], inplace=True)
-                df_day.dropna(subset=['Close'], inplace=True)
+                # Indicators (Calculated on Single-DF copy - fast)
+                # Note: df is passed by reference, but we assign new columns. 
+                # This modifies the cached DF in Session State (Good! Computed once).
+                if 'EMA_200' not in df_day.columns: df_day = self.calculate_indicators(df_day)
+                if 'EMA_50' not in df_60.columns: df_60 = self.calculate_indicators(df_60)
+                if 'EMA_20' not in df_15.columns: df_15 = self.calculate_indicators(df_15) # 15m needs less but consistent
                 
-                # Indicators
-                df_15 = self.calculate_indicators(df_15)
-                df_60 = self.calculate_indicators(df_60)
-                df_day = self.calculate_indicators(df_day) 
-                
-                if df_15 is None or df_60 is None or df_day is None: continue
+                if df_day is None or df_60 is None or df_15 is None: continue
 
-                # Weekly Data (Look up from map for consistency)
+                # Weekly Data
                 clean_ticker = ticker.replace(".NS", "")
                 w_data = weekly_map.get(clean_ticker, {'Rank': 999, 'Percent': 0.0, 'Category': ''})
-                weekly_gain = w_data['Percent']
                 
                 # Score
                 tqs = self.calculate_tqs_multi_tf(df_15, df_60, df_day)
@@ -588,49 +689,127 @@ class SwingEngine:
                 
                 # Tag Logic
                 curr_price = df_day['Close'].iloc[-1]
-                row_1h = df_60.iloc[-1]
-                prev_1h = df_60.iloc[-2]
                 
                 tag = "WAIT"
                 conf = "LOW"
                 
-                # Tagging Priority: Weekly Rocket > TQS Score > Reverse TQS (Sell)
-                if w_data['Rank'] <= 5 and tqs >= 7:
+                if w_data['Rank'] <= 10 and tqs >= 7:
                     tag = f"🔥 #{w_data['Rank']} W.GAINER ({w_data['Category']})"
                     conf = "EXTREME"
                 elif tqs >= 8:
-                    tag = "BUY SIGNAL"
-                    if weekly_gain > 5: tag = f"ROCKET ({w_data['Category']})"
+                    tag = "🚀 ROCKET"
                     conf = "HIGH"
-                    if tqs >= 9: conf = "EXTREME"
-                elif rev_tqs >= 8:
-                    tag = "SELL SIGNAL"
+                elif w_data['Percent'] > 5 and tqs >= 6:
+                    tag = "💪 STRONG"
                     conf = "HIGH"
-                elif tqs >= 5:
-                    tag = "WATCH"
-                    conf = "MEDIUM"
+                elif rev_tqs >= 7:
+                    tag = "⚠️ SELL SIGNAL"
+                    conf = "LOW"
 
-                # Dynamic Stop
-                stop_lvl = row_1h.get('EMA_20', curr_price * 0.95)
+                # Safe Extraction Helper
+                def get_val(series, default=0.0):
+                    try:
+                        val = series.iloc[-1]
+                        if isinstance(val, pd.Series): val = val.iloc[0]
+                        return float(val)
+                    except: return float(default)
 
-                if tag != "WAIT":
-                    results.append({
-                        "Symbol": clean_ticker,
-                        "Price": round(curr_price, 2),
-                        "TQS": tqs,
-                        "RevTQS": rev_tqs,
-                        "Confidence": conf,
-                        "Type": tag,
-                        "Weekly %": round(weekly_gain, 1),
-                        "Category": w_data['Category'],
-                        "Entry": "Market",
-                        "Stop": round(stop_lvl, 2), 
-                        "Change": round(((curr_price - prev_1h['Close'])/prev_1h['Close'])*100, 2),
-                        "RSI": round(row_1h.get('RSI', 50), 1)
-                    })
-                    
+                # Result Object (Strict JSON Compatibility)
+                chop_val = 50.0
+                if 'CHOP' in df_day.columns:
+                    chop_val = get_val(df_day['CHOP'], 50.0)
+
+                results.append({
+                    'Symbol': str(clean_ticker),
+                    'Price': float(round(get_val(df_day['Close']), 2)),
+                    'Change': float(round(((get_val(df_day['Close']) - get_val(df_day['Open']))/get_val(df_day['Open']) )*100, 2)),
+                    'TQS': int(tqs),
+                    'RevTQS': int(rev_tqs),
+                    'Weekly %': float(round(w_data['Percent'], 2)),
+                    'Type': str(tag),
+                    'Confidence': str(conf),
+                    'RSI': float(round(get_val(df_day['RSI']), 1)),
+                    'CHOP': float(round(chop_val, 1)),
+                    'Stop': float(round(get_val(df_day['EMA_20']), 2)), 
+                    'Entry': float(round(get_val(df_day['Close']), 2))
+                })
+                
             except Exception as e:
+                # print(f"Scan Error {ticker}: {e}")
                 continue
                 
-        results.sort(key=lambda x: x['TQS'], reverse=True)
+        # Sort by Ranking (Rocket/Weekly top)
+        # Priority: Confidence (EXTREME > HIGH) -> TQS
+        results.sort(key=lambda x: (1 if x['Confidence']=='EXTREME' else 0, x['TQS']), reverse=True)
         return results
+
+    def update_watchlist(self):
+        """Phase 5: Smart Scalable Watchlist Logic (Top 5 TQS>=8 -> 50 Max)"""
+        import sheets_db
+        print("🔄 Updating Smart Watchlist...")
+        
+        # 1. Fetch Data
+        data_map = self.fetch_data()
+        d_1d = data_map.get('1d', {})
+        d_1h = data_map.get('1h', {})
+        d_15m = data_map.get('15m', {})
+        
+        candidates = []
+        
+        for ticker in self.universe:
+            try:
+                # Direct Lookup
+                df_day = d_1d.get(ticker)
+                df_60 = d_1h.get(ticker)
+                df_15 = d_15m.get(ticker)
+                
+                if df_day is None or df_60 is None or df_15 is None: continue
+                if len(df_day) < 20: continue
+                
+                # Indicators (Fast calc on copy)
+                if 'EMA_200' not in df_day.columns: df_day = self.calculate_indicators(df_day)
+                if 'EMA_50' not in df_60.columns: df_60 = self.calculate_indicators(df_60)
+                if 'EMA_20' not in df_15.columns: df_15 = self.calculate_indicators(df_15)
+                
+                if df_day is None or df_60 is None: continue
+                
+                # Score
+                tqs = self.calculate_tqs_multi_tf(df_15, df_60, df_day)
+                
+                # Add if TQS >= 8
+                if tqs >= 8:
+                    curr_price = df_day['Close'].iloc[-1]
+                    candidates.append({
+                        'Symbol': ticker,
+                        'TQS': int(tqs),
+                        'Price': float(round(curr_price, 2)),
+                        'Date Added': pd.Timestamp.now().strftime("%Y-%m-%d")
+                    })
+            except Exception as e: continue
+            
+        print(f"   > Found {len(candidates)} High-Quality Candidates (TQS>=8)")
+        
+        # 2. Merge with Existing
+        current_wl = sheets_db.fetch_watchlist()
+        
+        # Convert to Dict for easy merge {Symbol: Record}
+        # Preference: New scan data updates TQS/Price, preserves Date Added (if exists)
+        wl_map = {item['Symbol']: item for item in current_wl}
+        
+        for cand in candidates:
+            if cand['Symbol'] in wl_map:
+                # Update TQS/Price, Keep Date
+                wl_map[cand['Symbol']]['TQS'] = cand['TQS']
+                wl_map[cand['Symbol']]['Price'] = cand['Price']
+            else:
+                # Add New
+                wl_map[cand['Symbol']] = cand
+        
+        # 3. Trim to Top 50 by TQS
+        final_list = list(wl_map.values())
+        final_list.sort(key=lambda x: x['TQS'], reverse=True)
+        final_list = final_list[:50]
+        
+        # 4. Save
+        sheets_db.save_watchlist(final_list)
+        return final_list

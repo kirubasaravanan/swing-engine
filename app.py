@@ -1,8 +1,34 @@
 import streamlit as st
 import pandas as pd
 import time
-from engine import SwingEngine
+import engine # Change to direct import for reload
 import sheets_db
+import os
+import requests
+import logging
+import importlib
+
+# --- CONFIG ---
+# Suppress Threading Warnings
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+
+SCAN_INTERVAL = 900 # 15 Minutes
+CACHE_DIR = "cache" 
+if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
+
+# --- CACHE CONTROL (Force Reload Logic) ---
+ENGINE_VERSION = 1.2 # Increment to 1.2 to force reload
+if 'engine_version' not in st.session_state or st.session_state['engine_version'] != ENGINE_VERSION:
+    print(f"🔄 Detected New Engine Version ({ENGINE_VERSION}). Reloading Module...")
+    if 'engine' in st.session_state: del st.session_state['engine']
+    if 'scan_results' in st.session_state: del st.session_state['scan_results'] 
+    
+    # CRITICAL: Reload the module codepath
+    importlib.reload(engine)
+    
+    st.session_state['engine_version'] = ENGINE_VERSION
+    time.sleep(0.1) 
+    st.rerun()
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -13,96 +39,76 @@ st.set_page_config(
 )
 
 # --- STYLING (Premium Dark/Clean) ---
+# --- STYLING (Premium Dark/Clean) ---
 st.markdown("""
 <style>
     .stApp {
         background-color: #0E1117;
         color: #FAFAFA;
     }
+    /* Buttons Visibility Fix */
+    .stButton > button {
+        background-color: #262730;
+        color: #FFFFFF;
+        border: 1px solid #4B4B4B;
+        font-weight: 600;
+        transition: all 0.2s;
+    }
+    .stButton > button:hover {
+        background-color: #4B4B4B;
+        border-color: #FFFFFF;
+        color: #FFFFFF;
+    }
+    /* Primary Action Buttons */
+    button[kind="primary"] {
+        background-color: #D50000 !important;
+        color: white !important;
+        border: none !important;
+    }
+    /* Metric Cards */
     .metric-card {
         background-color: #1E2329;
         padding: 20px;
         border-radius: 10px;
         border: 1px solid #2B313A;
-        margin-bottom: 10px;
     }
-    .card-title {
-        font-size: 1.2em;
-        font-weight: bold;
-        color: #00A6ED;
-    }
-    .card-price {
-        font-size: 1.5em;
-        font-weight: bold;
-    }
-    .tag-momentum {
-        background-color: #26A69A;
-        color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 0.8em;
-    }
-    .tag-break {
-        background-color: #7B1FA2;
-        color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 0.8em;
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap');
-    
-    .block-container { padding-top: 2rem; }
-    
-    .stButton > button {
-        background-color: #262730;
-        color: white;
-        border: 1px solid #4B4B4B;
-        font-family: 'Source Sans Pro', sans-serif;
-    }
-    .stButton > button:hover {
-        background-color: #D50000;
-        color: white;
-        border-color: #D50000;
-    }
-    /* Make Metrics Brighter */
-    [data-testid="stMetricValue"] {
-        color: #FFFFFF !important;
-        opacity: 1 !important;
-        font-weight: 700 !important;
-    }
-    [data-testid="stMetricLabel"] {
-        color: #AAAAAA !important;
-    }
+    /* Custom Tags */
     .tag-rocket {
         background-color: #D50000;
         color: white;
         padding: 2px 8px;
         border-radius: 4px;
-        font-size: 0.8em;
         font-weight: bold;
         box-shadow: 0 0 5px #D50000;
-        animation: pulse 2s infinite;
     }
-    @keyframes pulse {
-        0% { opacity: 1; }
-        50% { opacity: 0.8; }
-        100% { opacity: 1; }
-    }
-    .tqs-high { color: #00E676; font-weight: bold; }
-    .tqs-med { color: #FFEA00; font-weight: bold; }
-    .tqs-low { color: #FF5252; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
+
+# --- SESSION STATE ---
 # --- SESSION STATE ---
 @st.cache_resource
 def get_engine():
-    return SwingEngine()
+    # Use module reference to support reloading
+    import importlib
+    import engine
+    importlib.reload(engine)
+    return engine.SwingEngine()
+
+# Version Control for Session State
+ENGINE_VERSION = "1.2" # Increment this to force reload
+if 'engine_version' not in st.session_state or st.session_state['engine_version'] != ENGINE_VERSION:
+    st.toast("⚙️ Detected New Engine Version (1.2). Reloading Module...")
+    if 'engine' in st.session_state:
+        del st.session_state['engine']
+    st.session_state['engine_version'] = ENGINE_VERSION
 
 if 'engine' not in st.session_state:
     st.session_state['engine'] = get_engine()
 
 # --- INITIALIZE DATA ---
+# --- INITIALIZE DATA ---
+pos_data = [] # Default
 if 'scan_results' not in st.session_state:
     st.session_state['scan_results'] = []
     # Try Load from DB
@@ -117,21 +123,26 @@ if 'scan_results' not in st.session_state:
         if err_msg:
              st.session_state['db_error'] = err_msg
 
+# Load Portfolio Global (For Sidebar & Tab)
+import sheets_db
+pos_data = sheets_db.fetch_portfolio()
+st.session_state['portfolio'] = pos_data if pos_data else []
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("⚡ Decision Engine")
     
-    # Bucket Status
-    pf_count = len(st.session_state.get('portfolio', []))
+    # Bucket Status (Now Synced)
+    pf_count = len(st.session_state['portfolio'])
     MAX_SLOTS = 3
     
     # Progress Bar for Bucket
     st.markdown(f"**🪣 Trade Bucket ({pf_count}/{MAX_SLOTS})**")
     st.progress(min(pf_count / MAX_SLOTS, 1.0))
     if pf_count < MAX_SLOTS:
-        st.caption(f"🟢 {MAX_SLOTS - pf_count} Slots Available")
+        st.success(f"🟢 {MAX_SLOTS - pf_count} Slots Available")
     else:
-        st.caption("🔴 Bucket Full (Sell to Enter)")
+        st.error("🔴 Bucket Full (Sell to Enter)")
     
     st.write("---")
     
@@ -139,6 +150,13 @@ with st.sidebar:
     u_len = len(st.session_state['engine'].universe)
     st.markdown(f"**⚡ Active Universe**: `{u_len}` Stocks")
     st.caption("Nifty Midcap 100 + Smallcap 100")
+
+    # Angel One Status
+    st.markdown("---")
+    if 'angel_mgr' in st.session_state and st.session_state.angel_mgr:
+         st.success("🟢 Angel One Connected")
+    else:
+         st.warning("🟠 Using Parquet/Cache")
     
     with st.expander("Edit / Custom Tickers"):
         ticker_input = st.text_area(
@@ -171,10 +189,43 @@ with st.sidebar:
             else:
                 st.error(msg)
                 
-    if st.button("RUN SCAN 🚀", type="primary"):
+        # Performance Verification (Hidden Dev Tool)
+        if st.checkbox("Show Dev Tools"):
+            if st.button("🏆 PERFORMANCE TEST"):
+                start = time.time()
+                # Run small universe first to warm up cache if needed, or full
+                # Let's run full to prove 250 stocks speed
+                st.session_state['engine'].scan() 
+                end = time.time()
+                st.balloons()
+                st.success(f"✅ PASS: Scan completed in {end-start:.2f}s")
+                st.info(f"Using: {len(st.session_state['engine'].universe)} Stocks")
+                
+
+    # --- SCANNING LOGIC (Time-Gated) ---
+    
+    can_scan = True
+    time_left = 0
+    
+    if 'last_scan_time' in st.session_state:
+        elapsed = time.time() - st.session_state['last_scan_time']
+        if elapsed < SCAN_INTERVAL:
+            can_scan = False
+            time_left = int(SCAN_INTERVAL - elapsed)
+            
+    # Force Scan Checkbox
+    force_scan = st.checkbox("Force Scan (Ignore Timer)", value=False)
+    
+    # Determine Logic State
+    is_scan_ready = can_scan or force_scan
+    
+    btn_label = "RUN SCAN 🚀" if is_scan_ready else f"Wait {time_left//60}m {time_left%60}s ⏳"
+    
+    if st.button(btn_label, type="primary", disabled=not is_scan_ready):
+        st.session_state['last_scan_time'] = time.time()
         with st.status("🚀 Initializing Scan Sequence...", expanded=True) as status:
             
-            st.write("📡 Connecting to Market Data Feed...")
+            st.write("📡 Connecting to Market Data Feed (Parquet Cache)...")
             # Simulate slight delay to show progress (optional, but feels responsive)
             time.sleep(0.5)
             
@@ -230,7 +281,29 @@ st.title("Swing Decision Radar 📡")
 
 # TABS
 # TABS
-tab_radar, tab_portfolio, tab_history = st.tabs(["📡 Radar (Entries)", "💼 Portfolio (Exits)", "📜 History (P&L)"])
+tab_watchlist, tab_radar, tab_portfolio, tab_history = st.tabs(["⭐️ Smart Watchlist", "📡 Radar (Entries)", "💼 Portfolio (Exits)", "📜 History (P&L)"])
+
+with tab_watchlist:
+    st.header("⭐️ Smart Watchlist (Top TQS Survivors)")
+    st.caption("Auto-builds a list of high-quality stocks (TQS >= 8) over time. Max 50 stocks.")
+    
+    import sheets_db
+    
+    c_wl_btn, c_wl_info = st.columns([1, 3])
+    with c_wl_btn:
+        if st.button("🔄 Update Watchlist", type="primary"):
+            with st.spinner("Scanning Universe for Gems..."):
+                added = st.session_state['engine'].update_watchlist()
+                st.success(f"Updated! Watchlist now has {len(added)} stocks.")
+                time.sleep(1)
+                st.rerun()
+                
+    wl_data = sheets_db.fetch_watchlist()
+    if wl_data:
+        df_wl = pd.DataFrame(wl_data)
+        st.dataframe(df_wl, use_container_width=True)
+    else:
+        st.info("Watchlist is empty. Click Update to scan the universe.")
 
 with tab_history:
     st.header("Trade History (Realized P&L)")
@@ -257,28 +330,66 @@ with tab_history:
     else:
         st.info("No closed trades yet.")
 with tab_portfolio:
+    # --- EXIT MANAGER TOOLBAR ---
     st.subheader("Exit Manager")
     
-    with st.expander("> ➕ Add New Position"):
-        with st.form("add_pos"):
-            c1, c2 = st.columns(2)
-            s_sym = c1.text_input("Symbol (e.g. INFY)", "").upper()
-            s_entry = c2.number_input("Entry Price", min_value=0.0)
-            s_qty = c1.number_input("Qty", min_value=1, value=1)
-            s_stop = c2.number_input("Stop Loss", min_value=0.0)
+    # Layout: [Refresh Button] [Add Position Expander]
+    t_col1, t_col2 = st.columns([1, 3])
+    
+    with t_col1:
+        st.write("") # Spacer for alignment
+        if st.button("🔄 Refresh Data", use_container_width=True):
+            # FIX: Force Clear Cache to fetch fresh EOD prices
+            if 'market_cache' in st.session_state:
+                st.session_state.market_cache = {}
+            st.rerun()
             
-            if st.form_submit_button("Add Position"):
-                if s_sym and s_entry > 0:
-                    tqs = 0 
-                    if sheets_db.add_trade(s_sym, s_entry, s_qty, s_stop, tqs):
-                        st.success(f"Added {s_sym}")
-                        time.sleep(0.5)
-                        st.rerun()
-                    else:
-                        st.error("Failed to add DB")
+    with t_col2:
+        with st.expander("➕ Add New Position (Manual)", expanded=False):
+            # Helper: Fetch Price
+            c_search, c_btn = st.columns([3, 1])
+            uni_options = sorted([t.replace(".NS", "") for t in st.session_state['engine'].universe])
+            
+            with c_search:
+                sel_sym = st.selectbox("Search Symbol", uni_options)
+            
+            # State for filling
+            if 'form_entry' not in st.session_state: st.session_state['form_entry'] = 0.0
+            if 'form_stop' not in st.session_state: st.session_state['form_stop'] = 0.0
+            
+            with c_btn:
+                 st.write("")
+                 st.write("")
+                 if st.button("Fetch LTP 📡"):
+                     try:
+                         ltp = st.session_state['engine'].get_live_price(sel_sym + ".NS")
+                         if ltp:
+                             st.session_state['form_entry'] = float(ltp)
+                             st.session_state['form_stop'] = float(ltp * 0.95) # 5% default
+                             st.toast(f"Fetched {sel_sym}: {ltp}")
+                         else:
+                             st.warning("Could not fetch price")
+                     except: pass
+
+            # Valid Form
+            with st.form("add_pos_form"):
+                c1, c2 = st.columns(2)
+                s_entry = c1.number_input("Entry Price", min_value=0.0, value=st.session_state['form_entry'])
+                s_qty = c2.number_input("Qty", min_value=1, value=1)
+                s_stop = c1.number_input("Stop Loss", min_value=0.0, value=st.session_state['form_stop'])
+                
+                if st.form_submit_button("Confirm Add Position"):
+                    if sel_sym and s_entry > 0:
+                        tqs = 0 
+                        if sheets_db.add_trade(sel_sym, s_entry, s_qty, s_stop, tqs):
+                            st.success(f"Added {sel_sym}")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error("Failed to add DB")
 
     # --- UNIFIED PORTFOLIO MANAGER ---
-    pos_data = sheets_db.fetch_portfolio()
+    # pos_data is already loaded at top!
     
     if pos_data:
         pos_df = pd.DataFrame(pos_data)
@@ -359,19 +470,21 @@ with tab_portfolio:
                             time.sleep(1)
                             st.rerun()
 
-        # Manual Close
-        with st.expander("Manual Close / Delete"):
+        # Manual Close / Delete
+        with st.expander("⚙️ Manage / Edit Positions"):
              c1, c2, c3 = st.columns([1, 1, 1])
              with c1:
-                 m_sym = st.selectbox("Select Position", stock_list)
+                 m_sym = st.selectbox("Select Position to Manage", stock_list)
              with c2:
                  # Get current LTP
                  curr = pos_df[pos_df['Symbol']==m_sym]['LTP'].iloc[0] if not pos_df.empty else 0
                  m_price = st.number_input("Exit Price", value=float(curr))
              with c3:
                  st.write("")
-                 st.write("")
-                 if st.button("Close Trade"):
+                 st.write("") # Spacing
+                 
+                 # Close (Archive)
+                 if st.button("✅ Close Trade (P&L)", use_container_width=True):
                      entry = pos_df[pos_df['Symbol']==m_sym]['Entry'].iloc[0]
                      pnl = ((m_price - entry)/entry)*100
                      sheets_db.archive_trade({
@@ -380,7 +493,13 @@ with tab_portfolio:
                         'PnL': pnl, 'Reason': 'Manual'
                      })
                      sheets_db.delete_trade(m_sym)
-                     st.success(f"Manually Closed {m_sym}")
+                     st.success(f"Closed {m_sym}")
+                     st.rerun()
+
+                 if st.button("🗑️ Delete (Mistake)", type="primary", use_container_width=True):
+                     sheets_db.delete_trade(m_sym)
+                     st.warning(f"Deleted {m_sym} (No History)")
+                     time.sleep(1)
                      st.rerun()
                      
     else:
