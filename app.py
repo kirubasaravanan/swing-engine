@@ -252,6 +252,7 @@ with st.sidebar:
 
 # --- AUTHENTICATION ---
 # --- AUTHENTICATION ---
+# --- AUTHENTICATION ---
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
@@ -260,21 +261,39 @@ if not st.session_state['authenticated']:
     pwd = st.text_input("Enter Password", type="password")
     
     if st.button("Login"):
+        # 1. Check Cloud Secrets
         try:
             correct_pass = st.secrets["passwords"]["admin"]
-            if pwd == correct_pass:
-                st.session_state['authenticated'] = True
-                st.rerun()
-            else:
-                st.error("Incorrect Password")
         except:
-            if pwd == "swing123":
-                 st.session_state['authenticated'] = True
-                 st.rerun()
-            else:
-                 st.error("Setup .streamlit/secrets.toml or use default 'swing123'")
+            correct_pass = "swing123" # Fallback
+            
+        if pwd == correct_pass:
+            st.session_state['authenticated'] = True
+            st.success("Login Successful! Loading Engine...")
+            time.sleep(0.5)
+            st.rerun()
+        else:
+            st.error("Incorrect Password")
     
-    st.stop() # CRITICAL: Stop here if not authenticated
+    # Debug Helper for Cloud
+    with st.expander("Troubleshooting (Cloud)"):
+        st.write("Checking Secrets...")
+        if "passwords" in st.secrets:
+            st.success("✅ Secrets Loaded")
+        else:
+            st.warning("⚠️ Secrets Not Found (Using default 'swing123')")
+            
+        st.write(f"Session Auth: {st.session_state['authenticated']}")
+        
+    st.stop() # CRITICAL: Stop here passed
+
+# --- MAIN DASHBOARD GUARD ---
+try:
+    # ... Dashboard Code starts here ...
+    pass 
+except Exception as e:
+    st.error(f"❌ Critical App Crash: {e}")
+    st.stop()
 
 # --- MAIN DASHBOARD (Protected) ---
 st.title("Swing Decision Radar 📡")
