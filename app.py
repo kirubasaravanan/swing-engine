@@ -502,6 +502,7 @@ else:
     <div style="margin-bottom: 6px;">
         <span style="font-size: 20px; font-weight: 600; color: #FFFFFF;">₹{price:.1f}</span>
         <span style="font-size: 13px; color: {chg_color}; font-weight: 600; margin-left: 4px;">({chg_str})</span>
+        <span style="font-size: 11px; color: #AAAAAA; margin-left: 8px;">1W: <span style="color: #00E676;">{item.get('Weekly %', 0):.1f}%</span></span>
     </div>
     <div style="font-size: 11px; color: #8B949E; margin-bottom: 10px;">
         RSI: <span style="color: #E6EDF3;">{item['RSI']:.1f}</span> <span style="color: #484F58;">|</span> 
@@ -526,7 +527,7 @@ else:
     df_res = pd.DataFrame(results)
     if not df_res.empty:
         # Reorder
-        df_res = df_res[['Symbol', 'Price', 'Change', 'TQS', 'Confidence', 'Type', 'Entry', 'Stop', 'RSI']]
+        df_res = df_res[['Symbol', 'Price', 'Change', 'Weekly %', 'TQS', 'Confidence', 'Type', 'Entry', 'Stop', 'RSI']]
         
     # Color Helper
     def color_tqs(val):
@@ -537,8 +538,18 @@ else:
 
     # Color TQS in dataframe
     try:
+    def color_weekly(val):
+        try:
+            v = float(val)
+            if v > 10: return 'color: #D50000; font-weight: bold' # Rocket
+            if v > 5: return 'color: #00E676; font-weight: bold' # Strong
+        except: pass
+        return ''
+
+    try:
         st.dataframe(
-            df_res.style.map(color_tqs, subset=['TQS']),
+            df_res.style.map(color_tqs, subset=['TQS'])
+                        .map(color_weekly, subset=['Weekly %']),
             use_container_width=True,
             height=500
         )

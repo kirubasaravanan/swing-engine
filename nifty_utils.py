@@ -4,6 +4,19 @@ import io
 import time
 
 # --- FALLBACK LISTS (Expanded to ~150 Stocks for Reliability) ---
+FALLBACK_NEXT50 = [
+    "ADANIENSOL.NS", "ADANIGREEN.NS", "ADANIPOWER.NS", "ATGL.NS", "AMBUJACEM.NS",
+    "ABCAPITAL.NS", "BEL.NS", "BANKBARODA.NS", "BERGEPAINT.NS", "BHARATFORG.NS",
+    "BOSCHLTD.NS", "CANBK.NS", "CHOLAFIN.NS", "COLPAL.NS", "DLF.NS",
+    "DMART.NS", "GAIL.NS", "GODREJCP.NS", "GODREJPROP.NS", "HAL.NS",
+    "HAVELLS.NS", "HDFCAMC.NS", "ICICIGI.NS", "ICICIPRULI.NS", "IOC.NS",
+    "IRCTC.NS", "IRFC.NS", "JINDALSTEL.NS", "JIOFIN.NS", "LODHA.NS",
+    "MARICO.NS", "MOTHERSON.NS", "MUTHOOTFIN.NS", "NAUKRI.NS", "PIDILITIND.NS",
+    "PFC.NS", "PGHH.NS", "PNB.NS", "RECLTD.NS", "SBICARD.NS",
+    "SHREECEM.NS", "SIEMENS.NS", "SRF.NS", "TORNTPOWER.NS", "TRENT.NS",
+    "TVSMOTOR.NS", "UBL.NS", "UNITEDSPIRITS.NS", "VEDL.NS", "ZOMATO.NS"
+]
+
 FALLBACK_MIDCAP = [
     # Finance/Bank
     "PFC.NS", "RECLTD.NS", "YESBANK.NS", "FEDERALBNK.NS", "IDFCFIRSTB.NS", "AUBANK.NS", 
@@ -90,10 +103,20 @@ def get_smallcap100():
         return FALLBACK_SMALLCAP
     return syms
 
+def get_next50():
+    # URL for Nifty Next 50
+    url = "https://www.niftyindices.com/IndexConstituent/ind_niftynext50list.csv"
+    syms = fetch_nifty_csv(url)
+    if len(syms) < 10:
+        print("Using Fallback Next 50 List")
+        return FALLBACK_NEXT50
+    return syms
+
 def get_combined_universe():
-    print("Fetching Nifty Midcap & Smallcap 100...")
+    print("Fetching Nifty Next 50, Midcap & Smallcap...")
+    next50 = get_next50()
     mid = get_midcap100()
     small = get_smallcap100()
-    combined = list(set(mid + small)) # Remove dupes
+    combined = list(set(next50 + mid + small)) # Remove dupes
     print(f"Total Universe: {len(combined)} stocks")
     return combined

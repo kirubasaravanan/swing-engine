@@ -22,22 +22,32 @@ class SwingEngine:
         if tickers:
             self.universe = [t if ".NS" in t else f"{t}.NS" for t in tickers]
 
-    def fetch_data(self, period="6mo"):
-        """Fetch Batch Data"""
+    def fetch_data(self):
+        """Fetch Multi-Timeframe Batch Data (15m, 1h, 1d)"""
         if not self.universe: return {}
         
-        print(f"Fetching data for {len(self.universe)} stocks...")
+        print(f"Fetching Multi-TF data for {len(self.universe)} stocks...")
+        tickers = self.universe
+        
+        data_map = {}
+        
         try:
-            # Download batch
-            data = yf.download(
-                self.universe, 
-                period=period, 
-                interval="1d", 
-                group_by='ticker', 
-                progress=False,
-                threads=True
-            )
-            return data
+            # 1. Daily (3mo) for Trend & Weekly Gain
+            print(".. Downloading Daily Data")
+            d_1d = yf.download(tickers, period="3mo", interval="1d", group_by='ticker', progress=False, threads=True)
+            data_map['1d'] = d_1d
+            
+            # 2. Hourly (1mo) for TQS Core (RSI, Vol, Chop)
+            print(".. Downloading Hourly Data")
+            d_1h = yf.download(tickers, period="1mo", interval="1h", group_by='ticker', progress=False, threads=True)
+            data_map['1h'] = d_1h
+            
+            # 3. 15-Min (5d) for Entry Timing
+            print(".. Downloading 15m Data")
+            d_15m = yf.download(tickers, period="5d", interval="15m", group_by='ticker', progress=False, threads=True)
+            data_map['15m'] = d_15m
+            
+            return data_map
         except Exception as e:
             print(f"Fetch Error: {e}")
             return {}
@@ -112,61 +122,61 @@ class SwingEngine:
             return None
         return None
 
-    def calculate_tqs(self, row, prev_row=None):
+    def calculate_tqs_multi_tf(self, df_15m, df_1h, df_1d):
         """
-        0-10 Score based on Technicals.
-        prev_row: Optional previous day row for trend comparison.
+        Calculates TQS based on 3 Timeframes (0-10 Score).
+        Factors: Trend (2), RSI (2), Volume (2), Structure (2), Momentum (2)
         """
         score = 0
-        
-        # Guard against NaNs
         try:
-            # --- TREND (3 Max) ---
-            if row['Close'] > row['EMA_20']: score += 1
-            if row['EMA_20'] > row['EMA_50']: score += 1
-            if row['Close'] > row['EMA_200']: score += 1
+            # Get latest rows
+            row_15m = df_15m.iloc[-1]
+            row_1h = df_1h.iloc[-1]
+            row_1d = df_1d.iloc[-1]
             
-            # --- MOMENTUM (4 Max) ---
-            rsi = row['RSI']
+            # 1. TREND (2 pts): Price > EMA20 on ALL TFs
+            # Note: We need to assume indicators are already calculated on these DFs
+            trend_score = 0
+            if (row_15m['Close'] > row_15m.get('EMA_20', 999999) and 
+                row_1h['Close'] > row_1h.get('EMA_20', 999999) and 
+                row_1d['Close'] > row_1d.get('EMA_20', 999999)):
+                trend_score = 2
+            score += trend_score
             
-            # 1. RSI Regime
-            if 55 <= rsi <= 70:
-                score += 2 # SWEET SPOT
-            elif 50 <= rsi < 55:
-                score += 1 # Warming Up
-            elif rsi > 70:
-                score += 0 # Overheated
-            elif rsi < 50:
-                 score -= 1 # Penalty
-                 
-            # 2. MACD Check
-            if row['MACD'] > row['Signal']: score += 1
+            # 2. RSI (2 pts): 1H RSI in Sweet Spot (55-70)
+            rsi = row_1h.get('RSI', 50)
+            rsi_score = 0
+            if 55 <= rsi <= 70: rsi_score = 2
+            elif 50 <= rsi <= 75: rsi_score = 1
+            score += rsi_score
             
-            # 3. Rising RSI
-            if prev_row is not None and 'RSI' in prev_row and rsi > prev_row['RSI']:
-                 score += 1
+            # 3. VOLUME (2 pts): 1H Volume > 20MA * 1.2 + Green Candle
+            vol = row_1h.get('Volume', 0)
+            vol_avg = row_1h.get('Vol_SMA', 99999999)
+            vol_score = 1 # Default neutral
+            if vol > (vol_avg * 1.2) and row_1h['Close'] > row_1h['Open']:
+                vol_score = 2
+            score += vol_score
             
-            # --- STRUCTURE (3 Max) ---
-            # 1. Chop Index
-            chop = row.get('CHOP', 50)
-            if pd.isna(chop): chop = 50
+            # 4. STRUCTURE (2 pts): 1H CHOP < 50
+            chop = row_1h.get('CHOP', 50)
+            struct_score = 0
+            if chop < 50: struct_score = 2
+            elif chop < 55: struct_score = 1
+            score += struct_score
             
-            if chop < 50: 
-                score += 2
-            elif chop < 60:
-                score += 1
-            else:
-                score -= 1
-                
-            # 2. Volume Pulse (Handle Zero Div risk via safe check)
-            vol = row.get('Volume', 0)
-            vol_sma = row.get('Vol_SMA', 0)
-            if vol > vol_sma and vol_sma > 0: score += 1
+            # 5. MOMENTUM (2 pts): 1H MACD > Signal + Price > VWAP (Using EMA20 as VWAP proxy here to save fetch)
+            # Proxy: Price > EMA20 and MACD bullish
+            mom_score = 1
+            macd = row_1h.get('MACD', 0)
+            sig = row_1h.get('Signal', 0)
+            if row_1h['Close'] > row_1h.get('EMA_20', 0) and macd > sig:
+                mom_score = 2
+            score += mom_score
             
         except Exception:
-            return 0 # Fail safe default
-        
-        # Cap at 10, Min at 0
+            return 0
+            
         return max(min(score, 10), 0)
 
     def classify_trade(self, row, tqs):
@@ -206,62 +216,63 @@ class SwingEngine:
 
     def get_tqs_deep_dive(self, symbol):
         """
-        Generates detailed metrics for the 'Deep Dive' view.
-        Returns dict with: Probability, Break Level, Target, Risk, etc.
+        Generates detailed metrics using Multi-TF Data.
         """
         try:
-            # 1. Fetch Data (Need enough for 5D High + EMA20 + Indicators)
-            df = yf.download(symbol, period="3mo", interval="1d", progress=False)
-            if df.empty: return None
+            # 1. Fetch Multi-TF Data (Synchronous for single stock)
+            # Need threads=False for single to avoid overhead? Actually yf is fast.
+            # Using same fetch logic but for single ticker
             
-            # Flatten
-            if isinstance(df.columns, pd.MultiIndex):
-                 df.columns = df.columns.get_level_values(0)
-            df.columns = [str(c) for c in df.columns]
+            # Format ticker
+            if ".NS" not in symbol: symbol += ".NS"
+            
+            d_15m = yf.download(symbol, period="5d", interval="15m", progress=False)
+            d_1h = yf.download(symbol, period="1mo", interval="1h", progress=False)
+            d_1d = yf.download(symbol, period="3mo", interval="1d", progress=False)
+            
+            if d_15m.empty or d_1h.empty or d_1d.empty: return None
             
             # Indicators
-            df = self.calculate_indicators(df)
-            if df is None: return None
+            d_15m = self.calculate_indicators(d_15m)
+            d_1h = self.calculate_indicators(d_1h) # Main logic uses 1H
+            d_1d = self.calculate_indicators(d_1d)
             
-            row = df.iloc[-1]
-            tqs = self.calculate_tqs(row, df.iloc[-2])
+            if d_1h is None: return None
+
+            # Calculate TQS with new Multi-TF function
+            tqs = self.calculate_tqs_multi_tf(d_15m, d_1h, d_1d)
             
-            # 2. Logic - User Specific
-            # Break Level = 5D High (Rolling Max of High over 5, shifted by 1 or inclusive?)
-            # Usually breakout is > Max(High, 5). 
-            # If current price > this, triggered. We just return the level.
-            high_5d = df['High'].rolling(window=5).max().iloc[-1]
-            
-            # SL = EMA20 * 0.96 (4% risk as per request example)
-            # OR standard EMA20 if user prefers. Using 4% relative to EMA20 as "Safe Stop"
-            ema20 = row['EMA_20']
-            sl_safe = ema20 * 0.96
-            
+            # Get latest rows
+            row = d_1h.iloc[-1]
             curr_price = row['Close']
             
-            # If current price is way above EMA20, risk is high.
-            # Entry assumption: TODAY's Close (or recent).
+            # 2. Key Levels
+            # Break Level = 5D High (From Daily)
+            high_5d = d_1d['High'].rolling(window=5).max().iloc[-1]
+            
+            # Stop Loss (Dynamic: EMA20 on 1H for entered momentum)
+            ema20 = row.get('EMA_20', curr_price * 0.95)
+            sl_safe = ema20
+            
+            # Risk
             risk = curr_price - sl_safe
-            if risk < 0: risk = curr_price * 0.04 # Fallback if price < EMA20 (downtrend)
+            if risk < 0: risk = curr_price * 0.01 # Fallback min risk
             
             # Target 2R
             target = curr_price + (risk * 2)
             
-            # Probability
-            # TQS 10 = 82%, TQS 9 = 78%, TQS < 9 = 72% (Base)
+            # Probability (TQS based)
             prob = 72
             if tqs >= 10: prob = 82
             elif tqs == 9: prob = 78
             
-            # EV
-            # Win = 8% * Prob/100
-            # Loss = 4% * (1-Prob/100)
+            # EV Calculation
             win_pct = (target - curr_price) / curr_price
             loss_pct = (curr_price - sl_safe) / curr_price
             ev = (win_pct * (prob/100)) - (loss_pct * ((100-prob)/100))
             
             return {
-                "Symbol": symbol,
+                "Symbol": symbol.replace(".NS", ""),
                 "Price": curr_price,
                 "TQS": tqs,
                 "StopLoss": sl_safe,
@@ -272,7 +283,7 @@ class SwingEngine:
                 "EV_Pct": ev * 100
             }
         except Exception as e:
-            # print(f"Deep Dive Error: {e}")
+            print(f"Deep Dive Error: {e}")
             return None
 
     def check_exits(self, positions_df):
@@ -381,113 +392,163 @@ class SwingEngine:
             
         return exits
 
+    def get_weekly_rankings(self, d_1d):
+        """
+        Compute top weekly gainers from Daily Data.
+        Returns: Dict {Symbol: {'Rank': 1, 'Percent': 15.2, 'Category': 'MIDCAP'}}
+        """
+        rankings = []
+        
+        # Helper to categorize
+        from nifty_utils import FALLBACK_NEXT50, FALLBACK_MIDCAP, FALLBACK_SMALLCAP
+        def get_cat(sym):
+            s = sym + ".NS"
+            if s in FALLBACK_NEXT50: return "NEXT50"
+            if s in FALLBACK_MIDCAP: return "MIDCAP"
+            if s in FALLBACK_SMALLCAP: return "SMALLCAP"
+            return "Total Market"
+
+        # Check MultiIndex
+        if isinstance(d_1d.columns, pd.MultiIndex):
+            tickers = d_1d.columns.get_level_values(0).unique()
+        else:
+             return {}
+
+        for ticker in tickers:
+            try:
+                # Robust extract
+                df = d_1d.xs(ticker, axis=1, level=0)
+                if len(df) < 6: continue
+                
+                curr = df['Close'].iloc[-1]
+                week_ago = df['Close'].iloc[-6] 
+                pct = ((curr - week_ago) / week_ago) * 100
+                
+                rankings.append({
+                    'Symbol': ticker,
+                    'Percent': pct,
+                    'Category': get_cat(ticker)
+                })
+            except: continue
+            
+        # Sort
+        rankings.sort(key=lambda x: x['Percent'], reverse=True)
+        
+        # Convert to Map for O(1) Lookup
+        # We only care about Top 20 for highlighting
+        rank_map = {}
+        for i, r in enumerate(rankings):
+            rank_map[r['Symbol']] = {
+                'Rank': i + 1,
+                'Percent': r['Percent'],
+                'Category': r['Category']
+            }
+        return rank_map
+
     def scan(self, progress_callback=None):
-        """Main Scan Loop"""
-        if progress_callback: progress_callback(0.05) # 5% - Starting Download
+        """Main Scan Loop (Multi-Timeframe)"""
+        if progress_callback: progress_callback(0.05) # 5% - Reading Config
         
-        raw_data = self.fetch_data()
+        # 1. Fetch ALL Data
+        data_map = self.fetch_data()
+        if not data_map: return []
+        
+        d_15m = data_map.get('15m')
+        d_1h = data_map.get('1h')
+        d_1d = data_map.get('1d')
+        
+        # --- PRE-CALCULATE WEEKLY RANKINGS ---
+        weekly_map = self.get_weekly_rankings(d_1d)
+        
         results = []
-        
-        if raw_data is None or raw_data.empty: return []
-        
         tickers = self.universe
         total_tickers = len(tickers)
         
-        # Check column levels
-        # Debug showed: Batch -> names=['Ticker', 'Price'] (Ticker is Level 0)
-        # Single -> names=['Price', 'Ticker'] (Ticker is Level 1)
-        
-        ticker_level = 0
-        if raw_data.columns.names and 'Ticker' in raw_data.columns.names:
+        # Helper to extract single stock DF from batch
+        def get_df(batch_data, tic):
             try:
-                ticker_level = raw_data.columns.names.index('Ticker')
-            except: pass
-        elif raw_data.columns.names and 'Symbol' in raw_data.columns.names:
-             try:
-                ticker_level = raw_data.columns.names.index('Symbol')
-             except: pass
-             
-        # Fallback heuristic if names are missing
-        if getattr(raw_data.columns, 'nlevels', 1) > 1:
-            # If level 0 has OHLC, then Ticker is likely Level 1
-            if 'Close' in raw_data.columns.get_level_values(0):
-                 ticker_level = 1
+                if isinstance(batch_data.columns, pd.MultiIndex):
+                    # Level 0 is usually Ticker if group_by='ticker'
+                    return batch_data.xs(tic, axis=1, level=0).copy()
+                return None
+            except: return None
 
         for i, ticker in enumerate(tickers):
-            # Progress Update (10% to 100%)
-            # We reserve 0-10% for the "Fetch Data" phase which happens before this loop
             if progress_callback:
                 try:
-                    # Calculate progress: 0.10 + (0.90 * current/total)
                     p = 0.10 + (0.90 * (i + 1) / total_tickers)
                     progress_callback(p)
                 except: pass
 
             try:
-                df_tick = None
+                # Extract 3 Timeframes
+                df_15 = get_df(d_15m, ticker)
+                df_60 = get_df(d_1h, ticker)
+                df_day = get_df(d_1d, ticker)
                 
-                try:
-                    # Robust Selection
-                    if isinstance(raw_data.columns, pd.MultiIndex):
-                         df_tick = raw_data.xs(ticker, axis=1, level=ticker_level).copy()
-                    else:
-                         # Flat DF (rare for batch)
-                         if len(tickers) == 1: df_tick = raw_data.copy()
-                except KeyError:
-                    continue 
-
-                if df_tick is None or df_tick.empty: continue
+                if df_15 is None or df_60 is None or df_day is None: continue
+                if df_day.empty or len(df_day) < 20: continue 
                 
-                # Check if we have Price columns
-                if 'Close' not in df_tick.columns: continue
-
-                # Clean NaN rows
-                df_tick.dropna(subset=['Close'], inplace=True)
-                if len(df_tick) < 50: continue
-
-                # Calc Indicators
-                df_calc = self.calculate_indicators(df_tick)
-                if df_calc is None: continue
+                df_15.dropna(subset=['Close'], inplace=True)
+                df_60.dropna(subset=['Close'], inplace=True)
+                df_day.dropna(subset=['Close'], inplace=True)
                 
-                curr = df_calc.iloc[-1]
-                prev = df_calc.iloc[-2]
+                # Indicators
+                df_15 = self.calculate_indicators(df_15)
+                df_60 = self.calculate_indicators(df_60)
+                df_day = self.calculate_indicators(df_day) 
+                
+                if df_15 is None or df_60 is None or df_day is None: continue
+
+                # Weekly Data (Look up from map for consistency)
+                clean_ticker = ticker.replace(".NS", "")
+                w_data = weekly_map.get(clean_ticker, {'Rank': 999, 'Percent': 0.0, 'Category': ''})
+                weekly_gain = w_data['Percent']
                 
                 # Score
-                tqs = self.calculate_tqs(curr, prev)
+                tqs = self.calculate_tqs_multi_tf(df_15, df_60, df_day)
                 
-                # Classify
-                tag, intended_entry = self.classify_trade(curr, tqs)
+                # Tag Logic
+                curr_price = df_day['Close'].iloc[-1]
+                row_1h = df_60.iloc[-1]
+                prev_1h = df_60.iloc[-2]
                 
-                # Confidence Band
+                tag = "WAIT"
                 conf = "LOW"
-                if tqs >= 9: conf = "EXTREME"
-                elif tqs >= 7: conf = "HIGH"
-                elif tqs >= 5: conf = "MEDIUM"
                 
+                # Tagging Priority: Weekly Rocket > TQS Score
+                if w_data['Rank'] <= 5 and tqs >= 7:
+                    tag = f"🔥 #{w_data['Rank']} W.GAINER ({w_data['Category']})"
+                    conf = "EXTREME"
+                elif tqs >= 8:
+                    tag = "BUY SIGNAL"
+                    if weekly_gain > 5: tag = f"ROCKET ({w_data['Category']})"
+                    conf = "HIGH"
+                    if tqs >= 9: conf = "EXTREME"
+                elif tqs >= 5:
+                    tag = "WATCH"
+                    conf = "MEDIUM"
+
                 # Dynamic Stop
-                if "ROCKET" in tag or "MOMENTUM" in tag:
-                    stop_lvl = curr['EMA_20']
-                else:
-                    stop_lvl = curr['EMA_50']
+                stop_lvl = row_1h.get('EMA_20', curr_price * 0.95)
 
                 if tag != "WAIT":
                     results.append({
-                        "Symbol": ticker.replace(".NS", ""),
-                        "Price": round(curr['Close'], 2),
+                        "Symbol": clean_ticker,
+                        "Price": round(curr_price, 2),
                         "TQS": tqs,
                         "Confidence": conf,
                         "Type": tag,
-                        "Entry": round(intended_entry, 2) if intended_entry > 0 else "Market",
+                        "Weekly %": round(weekly_gain, 1),
+                        "Category": w_data['Category'],
+                        "Entry": "Market",
                         "Stop": round(stop_lvl, 2), 
-                        "Change": round(((curr['Close'] - prev['Close'])/prev['Close'])*100, 2),
-                        "RSI": round(curr['RSI'], 1),
-                        "CHOP": round(curr.get('CHOP', 50), 1)
+                        "Change": round(((curr_price - prev_1h['Close'])/prev_1h['Close'])*100, 2),
+                        "RSI": round(row_1h.get('RSI', 50), 1)
                     })
                     
             except Exception as e:
-                # print(f"Error {ticker}: {e}")
                 continue
                 
-        # Sort by TQS
         results.sort(key=lambda x: x['TQS'], reverse=True)
         return results
