@@ -177,7 +177,7 @@ def save_scan_results(results):
             worksheet = wb.add_worksheet(title="LatestScan", rows=100, cols=20)
             
         # Headers
-        headers = ["Symbol", "Price", "Change", "RSI", "CHOP", "TQS", "Type", "Stop", "Entry", "Confidence", "Updated"]
+        headers = ["Symbol", "Price", "Change", "Weekly %", "RSI", "CHOP", "TQS", "RevTQS", "Type", "Stop", "Entry", "Confidence", "Updated"]
         worksheet.append_row(headers)
         
         # Prepare Rows
@@ -187,12 +187,12 @@ def save_scan_results(results):
         rows = []
         for r in results:
             rows.append([
-                r['Symbol'], r['Price'], r['Change'], r['RSI'], r.get('CHOP', 0), 
-                r['TQS'], r['Type'], r['Stop'], r['Entry'], r['Confidence'], timestamp
+                r['Symbol'], r['Price'], r['Change'], r.get('Weekly %', 0.0), r['RSI'], r.get('CHOP', 0), 
+                r['TQS'], r.get('RevTQS', 0), r['Type'], r['Stop'], r['Entry'], r['Confidence'], timestamp
             ])
             
         worksheet.append_rows(rows)
-        print(f"💾 Saved {len(rows)} scan results to DB.")
+        print(f"Saved {len(rows)} scan results to DB.")
     except Exception as e:
         print(f"Error saving scan: {e}")
 

@@ -95,26 +95,30 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- SESSION STATE ---
-if 'engine' not in st.session_state:
-    st.session_state['engine'] = SwingEngine()
+@st.cache_resource
+def get_engine():
+    return SwingEngine()
 
-if 'scan_results' not in st.session_state:
-    st.session_state['scan_results'] = []
-    # Try Load from DB
-    import sheets_db
-    cached_res, updated_at, err_msg = sheets_db.fetch_scan_results()
-    
-    if cached_res:
-        st.session_state['scan_results'] = cached_res
-        st.session_state['last_update'] = updated_at
-    else:
-        st.session_state['last_update'] = None
-        if err_msg:
-             st.session_state['db_error'] = err_msg
+if 'engine' not in st.session_state:
+    st.session_state['engine'] = get_engine()
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("⚡ Decision Engine")
+    
+    # Bucket Status
+    pf_count = len(st.session_state.get('portfolio', []))
+    MAX_SLOTS = 3
+    
+    # Progress Bar for Bucket
+    st.markdown(f"**🪣 Trade Bucket ({pf_count}/{MAX_SLOTS})**")
+    st.progress(min(pf_count / MAX_SLOTS, 1.0))
+    if pf_count < MAX_SLOTS:
+        st.caption(f"🟢 {MAX_SLOTS - pf_count} Slots Available")
+    else:
+        st.caption("🔴 Bucket Full (Sell to Enter)")
+    
+    st.write("---")
     
     # Universe Stats
     u_len = len(st.session_state['engine'].universe)
@@ -238,205 +242,134 @@ with tab_history:
     else:
         st.info("No closed trades yet.")
 with tab_portfolio:
-    st.header("Exit Manager")
+    st.subheader("Exit Manager")
     
-    # Initialize Portfolio State from DB (Priority)
-    import sheets_db
-    
-    # Try to load from DB if session is empty or just refreshed
-    if 'portfolio' not in st.session_state or not st.session_state['portfolio']:
-        db_trades = sheets_db.fetch_portfolio()
-        if db_trades:
-             # Convert DB format to App format if needed (they are 1:1 here)
-             # Map keys if necessary, or just use as is
-             st.session_state['portfolio'] = db_trades
-    
-    if 'portfolio' not in st.session_state:
-        st.session_state['portfolio'] = []
-
-    # Input Form (Dropdown + Price)
-    # Input Form (Dropdown + Price)
-    # Input Form (Dropdown + Price)
-    with st.expander("➕ Add New Position", expanded=False):
-        c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1])
-        uni_options = sorted([t.replace(".NS", "") for t in st.session_state['engine'].universe])
-        
-        with c1:
-            sel_sym = st.selectbox("Select Stock", uni_options)
-        with c2:
-            sel_price = st.number_input("Entry Price", min_value=0.0, step=0.05)
-        with c3:
-            # Auto-calc default stop (5%)
-            def_stop = sel_price * 0.95 if sel_price > 0 else 0.0
-            sel_stop = st.number_input("Stop Loss", value=float(def_stop), step=0.05)
-        with c4:
-             sel_tqs = st.number_input("TQS Score", min_value=0, max_value=10, value=7)
-
-        if st.button("Add Trade", type="primary", use_container_width=True):
-             if sel_price > 0:
-                 new_pos = {
-                     "Symbol": sel_sym, "Entry": sel_price, 
-                     "StopLoss": sel_stop, "TQS": sel_tqs
-                 }
-                 if not any(p['Symbol'] == sel_sym for p in st.session_state['portfolio']):
-                     st.session_state['portfolio'].append(new_pos)
-                     try:
-                         sheets_db.add_trade(sel_sym, sel_price, 1, sel_stop, sel_tqs)
-                         st.success(f"Added {sel_sym}")
-                     except Exception as e:
-                         st.warning(f"DB Error: {e}")
-                     time.sleep(1)
-                     st.rerun()
-
-    st.markdown("---")
-
-    # Display & Check Exits
-    pf = st.session_state['portfolio']
-    
-    if pf:
-        # 1. LIVE P&L UPDATE & DISPLAY
-        # Fetch live prices for all symbols to show Real-Time P&L
-        if 'portfolio_data' not in st.session_state or st.button("🔄 Refresh Prices"):
-            with st.spinner("Fetching Live Prices..."):
-                updated_pf = []
-                for p in pf:
-                    # Get Live Price
-                    try:
-                        info = st.session_state['engine'].get_live_price(p['Symbol'] + ".NS")
-                        curr_price = info if info else p.get('Current', p['Entry'])
-                    except:
-                        curr_price = p['Entry']
-                    
-                    p['Current'] = curr_price
-                    p['PnL%'] = ((curr_price - p['Entry']) / p['Entry']) * 100
-                    updated_pf.append(p)
-                st.session_state['portfolio'] = updated_pf
-        
-        # Display Table with P&L
-        df_pf = pd.DataFrame(st.session_state['portfolio'])
-        if not df_pf.empty:
-            # Reorder
-            # Add Calculated Columns for display if missing
-            # Logic: Risk = Entry - Stop
-            # Target 1.5R (TQS < 9), Target 2R (TQS >= 9)
+    with st.expander("> ➕ Add New Position"):
+        with st.form("add_pos"):
+            c1, c2 = st.columns(2)
+            s_sym = c1.text_input("Symbol (e.g. INFY)", "").upper()
+            s_entry = c2.number_input("Entry Price", min_value=0.0)
+            s_qty = c1.number_input("Qty", min_value=1, value=1)
+            s_stop = c2.number_input("Stop Loss", min_value=0.0)
             
-            # Ensure columns exist (defaults if missing from DB)
-            if 'StopLoss' not in df_pf.columns: df_pf['StopLoss'] = df_pf['Entry'] * 0.95
-            if 'TQS' not in df_pf.columns: df_pf['TQS'] = 7
-            
-            # Vectorized Calculation
-            df_pf['Risk'] = df_pf['Entry'] - df_pf['StopLoss']
-            df_pf['Risk'] = df_pf['Risk'].apply(lambda x: max(x, 0.1)) # Avoid div/0
-            
-            # Dynamic Target
-            def calc_target(row):
-                try:
-                    r = float(row['Risk'])
-                    e = float(row['Entry'])
-                    tqs = int(float(row.get('TQS', 7))) # Handle string '9' or '9.0'
-                except:
-                    r, e, tqs = 1.0, 100.0, 7
-                
-                if tqs >= 9:
-                    return e + (2 * r) # 2R
-                return e + (1.5 * r) # 1.5R
-
-            df_pf['Target'] = df_pf.apply(calc_target, axis=1)
-            df_pf['R:R'] = (df_pf['Target'] - df_pf['Entry']) / df_pf['Risk']
-            
-            cols_to_show = ['Symbol', 'Entry', 'StopLoss', 'Target', 'Current', 'PnL%', 'R:R']
-            df_show = df_pf[cols_to_show].copy()
-            
-            def color_pnl(val):
-                color = '#00E676' if val >= 0 else '#FF5252'
-                return f'color: {color}; font-weight: bold'
-
-            st.dataframe(
-                df_show.style.applymap(color_pnl, subset=['PnL%']).format({
-                    "Entry": "{:.2f}", "Current": "{:.2f}", "PnL%": "{:.2f}%",
-                    "StopLoss": "{:.2f}", "Target": "{:.2f}", "R:R": "{:.1f}"
-                }),
-                use_container_width=True
-            )
-
-        # 2. TQS MONITOR (Days + Exit TQS)
-        st.markdown("### 🔍 TQS Monitor & Exit Signals")
-        if st.button("Analyze Positions (TQS + Days) 🔎", type="primary"):
-            pos_df = pd.DataFrame(st.session_state['portfolio'])
-            with st.spinner("Calculating Exit TQS & Time Decay..."):
-                # Engine now returns ALL rows with status, not just exits
-                # Validating engine update...
-                # Note: engine.check_exits returns list of dicts.
-                monitor_results = st.session_state['engine'].check_exits(pos_df)
-                
-            if monitor_results:
-                df_mon = pd.DataFrame(monitor_results)
-                
-                # Layout: Symbol | PnL | Days | Exit TQS | Action
-                cols = ['Symbol', 'PnL %', 'Days', 'Exit TQS', 'Action']
-                # Filter cols if they exist
-                cols = [c for c in cols if c in df_mon.columns]
-                
-                def color_mon(val):
-                    if "EXIT" in str(val) or "STOP" in str(val): return 'background-color: #FF5252; color: white'
-                    if "HOLD" in str(val): return 'background-color: #00E676; color: black'
-                    return ''
-                
-                st.dataframe(
-                    df_mon[cols].style.applymap(color_mon, subset=['Action']),
-                    use_container_width=True
-                )
-            else:
-                st.info("No active data to analyze.")
-
-        # 3. MANUAL ACTIONS
-        st.markdown("### ⚙️ Position Actions")
-        with st.expander("Close or Delete Position", expanded=True):
-            c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1])
-            active_syms = [p['Symbol'] for p in st.session_state['portfolio']]
-            
-            with c1:
-                close_sym = st.selectbox("Select Position", active_syms)
-            with c2:
-                # Find current price of selected
-                curr_p = next((p['Current'] for p in st.session_state['portfolio'] if p['Symbol'] == close_sym), 0.0)
-                exit_price = st.number_input("Exit Price", value=float(curr_p), step=0.05)
-            
-            with c3:
-                st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
-                if st.button("🚫 Close (Sell)", type="primary"):
-                    entry_p = next((p['Entry'] for p in st.session_state['portfolio'] if p['Symbol'] == close_sym), 0.0)
-                    pnl_amt = exit_price - entry_p
-                    pnl_pct = (pnl_amt / entry_p) * 100
-                    
-                    trade_record = {
-                        "Symbol": close_sym, "Entry": entry_p, "Exit": exit_price,
-                        "PnL": pnl_pct, "Reason": "Manual Close", "Date": time.strftime("%Y-%m-%d")
-                    }
-                    try:
-                        sheets_db.archive_trade(trade_record)
-                        sheets_db.delete_trade(close_sym)
-                        st.session_state['portfolio'] = [p for p in st.session_state['portfolio'] if p['Symbol'] != close_sym]
-                        st.success(f"Closed {close_sym}. PnL: {pnl_pct:.2f}%")
-                        time.sleep(1)
+            if st.form_submit_button("Add Position"):
+                if s_sym and s_entry > 0:
+                    tqs = 0 
+                    if sheets_db.add_trade(s_sym, s_entry, s_qty, s_stop, tqs):
+                        st.success(f"Added {s_sym}")
+                        time.sleep(0.5)
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                    else:
+                        st.error("Failed to add DB")
+
+    # --- UNIFIED PORTFOLIO MANAGER ---
+    pos_data = sheets_db.fetch_portfolio()
+    
+    if pos_data:
+        pos_df = pd.DataFrame(pos_data)
+        
+        # 1. AUTO-ANALYZE & MERGE
+        with st.spinner("Analyzing Positions..."):
+            try:
+                # Run Engine Check
+                analysis = st.session_state['engine'].check_exits(pos_df)
+                if analysis:
+                    an_df = pd.DataFrame(analysis)
+                    if 'Symbol' in an_df.columns:
+                        an_df = an_df.drop_duplicates(subset=['Symbol'])
+                        # Merge actionable data
+                        pos_df = pd.merge(pos_df, an_df[['Symbol', 'Action', 'Reason', 'Days', 'Current']], on='Symbol', how='left')
                         
-            with c4:
-                st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
-                if st.button("🗑️ Delete (Mistake)"):
-                    try:
-                        sheets_db.delete_trade(close_sym)
-                        st.session_state['portfolio'] = [p for p in st.session_state['portfolio'] if p['Symbol'] != close_sym]
-                        st.info(f"Deleted {close_sym} without P&L impact.")
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                        # Fill NaNs
+                        pos_df['Action'] = pos_df['Action'].fillna('HOLD')
+                        pos_df['Reason'] = pos_df['Reason'].fillna('-')
+                        pos_df['Days'] = pos_df['Days'].fillna(0).astype(int)
+                        # Update LTP
+                        pos_df['LTP'] = pos_df['Current'].combine_first(pos_df['LTP'])
+            except Exception as e:
+                # Non-critical, just show raw DB data
+                pass
 
+        # 2. DISPLAY TABLE
+        # Columns: Symbol | Entry | LTP | PnL% | Days | Action | Reason
+        if 'Action' not in pos_df.columns: pos_df['Action'] = 'HOLD'
+        if 'Reason' not in pos_df.columns: pos_df['Reason'] = '-'
+        if 'Days' not in pos_df.columns: pos_df['Days'] = 0
+        
+        # Calculate PnL if missing
+        pos_df['LTP'] = pos_df.get('LTP', pos_df['Entry'])
+        pos_df['PnL_Pct'] = ((pos_df['LTP'] - pos_df['Entry']) / pos_df['Entry']) * 100
+        
+        show_cols = ['Symbol', 'Entry', 'LTP', 'PnL_Pct', 'Days', 'Action', 'Reason']
+        
+        def color_action(val):
+            if val == "HOLD": return 'color: #00E676'
+            if "EXIT" in val or "BOOK" in val: return 'color: #FF5252; font-weight: bold'
+            return ''
+
+        st.dataframe(
+            pos_df[show_cols].style.map(color_action, subset=['Action']).format({
+                'Entry': '{:.2f}', 'LTP': '{:.2f}', 'PnL_Pct': '{:.2f}%'
+            }),
+            use_container_width=True,
+            height=300
+        )
+        
+        # 3. ACTIONABLE EXITS
+        exitable = pos_df[pos_df['Action'] != 'HOLD']
+        stock_list = pos_df['Symbol'].unique()
+        
+        st.markdown("### ⚙️ Actions")
+        
+        # Auto-Exits
+        if not exitable.empty:
+            st.markdown("##### ⚠️ Recommended Exits")
+            for i, row in exitable.iterrows():
+                c1, c2, c3 = st.columns([1, 2, 1])
+                with c1: st.write(f"**{row['Symbol']}**")
+                with c2: st.write(f"{row['Action']} ({row['Reason']})")
+                with c3:
+                    if st.button(f"EXECUTE EXIT", key=f"btn_exit_{row['Symbol']}"):
+                        if sheets_db.close_trade_db(row['Symbol'], row['LTP']):
+                            sheets_db.archive_trade({
+                                'Date': row.get('Date', time.strftime("%Y-%m-%d")),
+                                'Symbol': row['Symbol'],
+                                'Entry': row['Entry'],
+                                'Exit': row['LTP'],
+                                'PnL': row['PnL_Pct'],
+                                'Reason': row['Reason']
+                            })
+                            sheets_db.delete_trade(row['Symbol'])
+                            st.success(f"Exited {row['Symbol']}!")
+                            time.sleep(1)
+                            st.rerun()
+
+        # Manual Close
+        with st.expander("Manual Close / Delete"):
+             c1, c2, c3 = st.columns([1, 1, 1])
+             with c1:
+                 m_sym = st.selectbox("Select Position", stock_list)
+             with c2:
+                 # Get current LTP
+                 curr = pos_df[pos_df['Symbol']==m_sym]['LTP'].iloc[0] if not pos_df.empty else 0
+                 m_price = st.number_input("Exit Price", value=float(curr))
+             with c3:
+                 st.write("")
+                 st.write("")
+                 if st.button("Close Trade"):
+                     entry = pos_df[pos_df['Symbol']==m_sym]['Entry'].iloc[0]
+                     pnl = ((m_price - entry)/entry)*100
+                     sheets_db.archive_trade({
+                        'Date': time.strftime("%Y-%m-%d"),
+                        'Symbol': m_sym, 'Entry': entry, 'Exit': m_price,
+                        'PnL': pnl, 'Reason': 'Manual'
+                     })
+                     sheets_db.delete_trade(m_sym)
+                     st.success(f"Manually Closed {m_sym}")
+                     st.rerun()
+                     
     else:
-        st.info("Portfolio empty. Add positions above.")
+        st.info("Portfolio is empty.")
 
 with tab_radar:
     results = st.session_state['scan_results']
@@ -458,17 +391,8 @@ else:
     # --- CARDS VIEW (Top Picks) ---
     st.subheader("🔥 Top Picks")
     
-    # Filter: Prioritize ROCKET LAUNCH
-    # We want to force bubble up ROCKET LAUNCH even if TQS is slightly lower (e.g. 8 vs 10)
-    # But usually TQS will be high.
-    
-    # Sort with custom logic: ROCKET first, then Score
-    def sort_key(x):
-        is_rocket = 100 if "ROCKET" in x['Type'] else 0
-        return is_rocket + x['TQS']
-        
-    sorted_top = sorted(results, key=sort_key, reverse=True)
-    top_picks = sorted_top[:6]
+    # Filter: Top Picks (Sorted by TQS in Engine)
+    top_picks = results[:6]
     
     cols = st.columns(3)
     for i, item in enumerate(top_picks):
@@ -526,8 +450,15 @@ else:
     
     df_res = pd.DataFrame(results)
     if not df_res.empty:
+        # Ensure Weekly % exists
+        if 'Weekly %' not in df_res.columns:
+            df_res['Weekly %'] = 0.0
+            
+        if 'RevTQS' not in df_res.columns:
+            df_res['RevTQS'] = 0
+
         # Reorder
-        df_res = df_res[['Symbol', 'Price', 'Change', 'Weekly %', 'TQS', 'Confidence', 'Type', 'Entry', 'Stop', 'RSI']]
+        df_res = df_res[['Symbol', 'Price', 'Change', 'Weekly %', 'TQS', 'RevTQS', 'Confidence', 'Type', 'Entry', 'Stop', 'RSI']]
         
     # Color Helper
     def color_tqs(val):
@@ -537,7 +468,7 @@ else:
         else: return 'background-color: #FF5252; color: white'
 
     # Color TQS in dataframe
-    try:
+    # Color Helper for Weekly %
     def color_weekly(val):
         try:
             v = float(val)
@@ -553,6 +484,9 @@ else:
             use_container_width=True,
             height=500
         )
+    except Exception as e:
+        st.write(df_res) # Fallback
+
     except:
         # Fallback for older pandas
         st.dataframe(

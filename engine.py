@@ -11,12 +11,14 @@ DEFAULT_TICKERS = [
     "VBL.NS", "COALINDIA.NS", "ONGC.NS", "NTPC.NS", "POWERGRID.NS"
 ]
 
-from nifty_utils import get_combined_universe
+from nifty_utils import get_combined_universe, get_categorized_universe
 
 class SwingEngine:
     def __init__(self):
         # Auto-load Midcap/Smallcap Universe
-        self.universe = get_combined_universe()
+        univ, cat_map = get_categorized_universe()
+        self.universe = univ
+        self.category_map = cat_map
     
     def set_universe(self, tickers):
         if tickers:
@@ -291,8 +293,13 @@ class SwingEngine:
         Check existing positions for Exit Signals.
         positions_df: DataFrame with ['Symbol', 'Entry']
         """
-        raw_data = self.fetch_data() # Re-fetch or pass cached data in real app (simplified here)
-        if raw_data is None or raw_data.empty: return [] # Handle gracefully
+        data_map = self.fetch_data() # Returns dict {'15m':..., '1h':...}
+        if not data_map: return []
+        
+        # Use 1H data for Exits (Dynamic) or 1D for Trend?
+        # Let's use 1H for granular exits (RSI > 75 etc)
+        raw_data = data_map.get('1h')
+        if raw_data is None or raw_data.empty: return []
         
         exits = []
         
@@ -362,6 +369,14 @@ class SwingEngine:
             curr_price = curr['Close']
             pnl_pct = ((curr_price - entry) / entry) * 100
             
+            # Days Held
+            days_held = 0
+            try:
+                entry_date = pd.to_datetime(row['Date'])
+                today = pd.Timestamp.now()
+                days_held = (today - entry_date).days
+            except: pass
+            
             # 1. Profit Target (Momentum Fade)
             if curr['RSI'] > 75:
                 action = "BOOK PROFIT"
@@ -380,17 +395,59 @@ class SwingEngine:
                 action = "HARD EXIT"
                 reason = "Trend Broken (< EMA20)"
                 
+            # 4. Weakness (Reverse TQS)
+            # We can calculate RevTQS here too if we passed daily data
+            # For now keeping it simple based on EMA/RSI
+                
             exits.append({
                 'Symbol': row['Symbol'],
                 'Current': round(curr_price, 2),
                 'PnL %': round(pnl_pct, 1),
                 'Action': action,
                 'Reason': reason,
+                'Days': days_held,
                 'RSI': round(curr['RSI'], 1),
                 'EMA9': round(curr['EMA_9'], 1)
             })
             
         return exits
+
+    def calculate_reverse_tqs(self, row, df_daily):
+        """
+        Calculates Reverse TQS (Weakness/Sell Score 0-10).
+        High Score = Strong Sell Signal.
+        """
+        score = 0
+        try:
+            # 1. TREND BROKEN (3 pts)
+            # Price < EMA20 on Daily (-2) and Hourly (-1)
+            ema20 = row.get('EMA_20', 0)
+            if row['Close'] < ema20: score += 2
+            
+            # Daily Trend check (using last row of daily)
+            d_row = df_daily.iloc[-1]
+            if d_row['Close'] < d_row.get('EMA_20', 0): score += 1
+            
+            # 2. MOMENTUM FADE (3 pts)
+            # RSI < 40 (Oversold/Bearish) or RSI Divergence (simplified)
+            rsi = row.get('RSI', 50)
+            if rsi < 40: score += 2     # Bearish Regime
+            elif rsi < 50: score += 1   # Weak
+            
+            # MACD Bearish
+            if row.get('MACD', 0) < row.get('Signal', 0): score += 1
+            
+            # 3. VOLUME DISTRIBUTION (2 pts)
+            # Red candle with High Vol
+            if row['Close'] < row['Open'] and row.get('Volume', 0) > row.get('Vol_SMA', 0):
+                score += 2
+                
+            # 4. STRUCTURE (2 pts)
+            # Lower Lows? (Simple proxy: Close < Prev Close)
+            if row['Close'] < row.get('Open', 0): score += 2
+            
+        except: return 0
+        return max(min(score, 10), 0)
 
     def get_weekly_rankings(self, d_1d):
         """
@@ -400,24 +457,43 @@ class SwingEngine:
         rankings = []
         
         # Helper to categorize
-        from nifty_utils import FALLBACK_NEXT50, FALLBACK_MIDCAP, FALLBACK_SMALLCAP
         def get_cat(sym):
-            s = sym + ".NS"
-            if s in FALLBACK_NEXT50: return "NEXT50"
-            if s in FALLBACK_MIDCAP: return "MIDCAP"
-            if s in FALLBACK_SMALLCAP: return "SMALLCAP"
-            return "Total Market"
+            s = sym if ".NS" in sym else sym + ".NS"
+            return self.category_map.get(s, "Total Market")
 
-        # Check MultiIndex
+        # Dynamic Ticker Level Detection
+        tickers = []
+        ticker_level = 0
+        
         if isinstance(d_1d.columns, pd.MultiIndex):
-            tickers = d_1d.columns.get_level_values(0).unique()
+            # Try to find which level looks like a Ticker (string, contains .NS or is upper)
+            # Usually Level 0 is Ticker for group_by='ticker'
+            # But yfinance changed recently to (Price, Ticker) sometimes.
+            
+            l0 = d_1d.columns.get_level_values(0)
+            l1 = d_1d.columns.get_level_values(1) if d_1d.columns.nlevels > 1 else []
+            
+            if len(l0) > 0 and ".NS" in str(l0[0]):
+                ticker_level = 0
+                tickers = l0.unique()
+            elif len(l1) > 0 and ".NS" in str(l1[0]):
+                ticker_level = 1
+                tickers = l1.unique()
+            elif len(l0) > 0 and str(l0[0]).isupper() and "CLOSE" not in str(l0[0]).upper():
+                 # Maybe tickers without .NS
+                 ticker_level = 0
+                 tickers = l0.unique()
+            else:
+                 # Fallback: Assume Level 0 if not Price
+                 ticker_level = 0
+                 tickers = l0.unique()
         else:
              return {}
 
         for ticker in tickers:
             try:
                 # Robust extract
-                df = d_1d.xs(ticker, axis=1, level=0)
+                df = d_1d.xs(ticker, axis=1, level=ticker_level)
                 if len(df) < 6: continue
                 
                 curr = df['Close'].iloc[-1]
@@ -438,7 +514,8 @@ class SwingEngine:
         # We only care about Top 20 for highlighting
         rank_map = {}
         for i, r in enumerate(rankings):
-            rank_map[r['Symbol']] = {
+            clean_sym = r['Symbol'].replace(".NS", "")
+            rank_map[clean_sym] = {
                 'Rank': i + 1,
                 'Percent': r['Percent'],
                 'Category': r['Category']
@@ -507,6 +584,7 @@ class SwingEngine:
                 
                 # Score
                 tqs = self.calculate_tqs_multi_tf(df_15, df_60, df_day)
+                rev_tqs = self.calculate_reverse_tqs(df_60.iloc[-1], df_day)
                 
                 # Tag Logic
                 curr_price = df_day['Close'].iloc[-1]
@@ -516,7 +594,7 @@ class SwingEngine:
                 tag = "WAIT"
                 conf = "LOW"
                 
-                # Tagging Priority: Weekly Rocket > TQS Score
+                # Tagging Priority: Weekly Rocket > TQS Score > Reverse TQS (Sell)
                 if w_data['Rank'] <= 5 and tqs >= 7:
                     tag = f"🔥 #{w_data['Rank']} W.GAINER ({w_data['Category']})"
                     conf = "EXTREME"
@@ -525,6 +603,9 @@ class SwingEngine:
                     if weekly_gain > 5: tag = f"ROCKET ({w_data['Category']})"
                     conf = "HIGH"
                     if tqs >= 9: conf = "EXTREME"
+                elif rev_tqs >= 8:
+                    tag = "SELL SIGNAL"
+                    conf = "HIGH"
                 elif tqs >= 5:
                     tag = "WATCH"
                     conf = "MEDIUM"
@@ -537,6 +618,7 @@ class SwingEngine:
                         "Symbol": clean_ticker,
                         "Price": round(curr_price, 2),
                         "TQS": tqs,
+                        "RevTQS": rev_tqs,
                         "Confidence": conf,
                         "Type": tag,
                         "Weekly %": round(weekly_gain, 1),

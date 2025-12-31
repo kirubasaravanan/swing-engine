@@ -120,3 +120,20 @@ def get_combined_universe():
     combined = list(set(next50 + mid + small)) # Remove dupes
     print(f"Total Universe: {len(combined)} stocks")
     return combined
+
+def get_categorized_universe():
+    """
+    Returns (all_tickers, category_map)
+    category_map: {'SYMBOL.NS': 'MIDCAP', ...}
+    """
+    next50 = get_next50()
+    mid = get_midcap100()
+    small = get_smallcap100()
+    
+    cat_map = {}
+    for t in next50: cat_map[t] = "NEXT50"
+    for t in mid: cat_map[t] = "MIDCAP"
+    for t in small: cat_map[t] = "SMALLCAP"
+    
+    combined = list(set(next50 + mid + small))
+    return combined, cat_map
