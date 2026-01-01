@@ -516,30 +516,61 @@ class SwingEngine:
             except:
                 return ticker, None, None, None
 
-        # PARALLEL EXECUTION (Optimized for 3 req/sec limit)
-        # Angel One allows ~3 requests per second. 
-        # Using 3 workers attempts to maximize this without hitting 429 Too Many Requests.
-        max_workers = 3 
-        print(f"[INFO] Fetching Data for {len(tickers)} stocks (Parallel {max_workers} Threads)...")
+        # PARALLEL EXECUTION STRATEGY
+        # Cloud/CI usually has limited CPU or gets rate-limited by Angel One.
+        # Local can handle parallelism better.
         
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(fetch_ticker_tfs, t): t for t in tickers}
+        is_cloud = os.getenv("CI") or os.getenv("GITHUB_ACTIONS") or (
+            hasattr(st, "secrets") and "ANGEL_API_KEY" in st.secrets
+        )
+
+        if is_cloud:
+             # SEQUENTIAL (Safe Mode) - 1 Request at a time
+             print("[INFO] Cloud Environment Detected. Using Sequential Access to avoid 429/Timeout.")
+             results_map = results
+             completed_count = 0
+             
+             import time
+             for tic in tickers:
+                  tic, d1, h1, m15 = fetch_ticker_tfs(tic)
+                  if d1 is not None and not d1.empty: results_map['1d'][tic] = d1
+                  if h1 is not None and not h1.empty: results_map['1h'][tic] = h1
+                  if m15 is not None and not m15.empty: results_map['15m'][tic] = m15
+                  
+                  completed_count += 1
+                  if progress_callback and completed_count % 5 == 0:
+                      try: progress_callback(0.10 + (0.90 * completed_count / len(tickers)))
+                      except: pass
+                  
+                  # Throttle (Crucial for Cloud)
+                  time.sleep(0.5) 
+             
+             print(f"[INFO] Data Loaded (Sequential). 1D: {len(results['1d'])}")
+             return results_map
+
+        else:
+            # PARALLEL (Local Mode) - 3 Workers
+            max_workers = 3 
+            print(f"[INFO] Fetching Data for {len(tickers)} stocks (Parallel {max_workers} Threads)...")
             
-            completed_count = 0
-            for future in as_completed(futures):
-                tic, d1, h1, m15 = future.result()
-                if d1 is not None and not d1.empty: results['1d'][tic] = d1
-                if h1 is not None and not h1.empty: results['1h'][tic] = h1
-                if m15 is not None and not m15.empty: results['15m'][tic] = m15
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(fetch_ticker_tfs, t): t for t in tickers}
                 
-                completed_count += 1
-                if completed_count % 50 == 0:
-                    print(f"[INFO] Progress: {completed_count}/{len(tickers)}...")
+                completed_count = 0
+                for future in as_completed(futures):
+                    tic, d1, h1, m15 = future.result()
+                    if d1 is not None and not d1.empty: results['1d'][tic] = d1
+                    if h1 is not None and not h1.empty: results['1h'][tic] = h1
+                    if m15 is not None and not m15.empty: results['15m'][tic] = m15
                     
-        print(f"[INFO] Data Loaded. 1D: {len(results['1d'])} | 1H: {len(results['1h'])} | 15M: {len(results['15m'])}")
-        return results
+                    completed_count += 1
+                    if completed_count % 50 == 0:
+                        print(f"[INFO] Progress: {completed_count}/{len(tickers)}...")
+                        
+            print(f"[INFO] Data Loaded. 1D: {len(results['1d'])} | 1H: {len(results['1h'])} | 15M: {len(results['15m'])}")
+            return results
 
     def get_weekly_rankings(self, d_1d_dict):
         """
