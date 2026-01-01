@@ -705,49 +705,53 @@ with tab_portfolio:
         st.info("Portfolio is empty.")
 
 with tab_radar:
-    results = st.session_state['scan_results']
-
-if len(results) == 0:
-    st.info("Hit 'RUN SCAN' to fetch live opportunities.")
-else:
-    # --- METRICS ROW ---
-    col1, col2, col3 = st.columns(3)
-    c_high = len([r for r in results if r['Confidence'] == 'EXTREME'])
-    c_med = len([r for r in results if r['Confidence'] == 'HIGH'])
-    
-    col1.metric("Opportunities Found", len(results))
-    col2.metric("Extreme Confidence (TQS 9-10)", c_high)
-    col3.metric("High Confidence (TQS 7-8)", c_med)
-    
-    st.markdown("---")
-    
-    # --- CARDS VIEW (Top Picks) ---
-    st.subheader("🔥 Top Picks")
-    
-    # Filter: Top Picks (Sorted by TQS in Engine)
-    # Ensure Sorting is robust (Handle String/Int mix from DB)
-    try:
-        results.sort(key=lambda x: (int(x.get('TQS', 0)), x.get('Confidence')=='EXTREME', -float(x.get('Price', 0))), reverse=True)
-    except: pass # Fallback to engine sort
-    
-    top_picks = results[:6]
-    
-    cols = st.columns(3)
-    for i, item in enumerate(top_picks):
-        with cols[i % 3]:
-            # Card HTML - Premium Design matching User Request
+    if 'scan_results' not in st.session_state:
+        st.info("👇 Hit 'RUN SCAN' (Sidebar) to fetch live opportunities.")
+    else:
+        results = st.session_state['scan_results']
+        if len(results) == 0:
+            st.warning("⚠️ Scan Completed: No stocks met the entry criteria (High Volatility + TQS).")
+            st.caption("Try checking 'Force Scan' or waiting for market hours.")
+        else:
+        else:
+            # --- METRICS ROW ---
+            col1, col2, col3 = st.columns(3)
+            c_high = len([r for r in results if r['Confidence'] == 'EXTREME'])
+            c_med = len([r for r in results if r['Confidence'] == 'HIGH'])
             
-            # Colors
-            p_color = "#00F0FF" if "ROCKET" in item['Type'] else "#00E676"
+            col1.metric("Opportunities Found", len(results))
+            col2.metric("Extreme Confidence (TQS 9-10)", c_high)
+            col3.metric("High Confidence (TQS 7-8)", c_med)
             
-            # Format Prices
-            price = float(item['Price'])
-            chg = float(item['Change'])
-            chg_str = f"{chg:+.2f}%"
-            chg_color = "#00E676" if chg >= 0 else "#FF5252"
+            st.markdown("---")
             
-            # Target/Stop (Calculated 2R for display)
-            risk = max(price - item['Stop'], price*0.01)
+            # --- CARDS VIEW (Top Picks) ---
+            st.subheader("🔥 Top Picks")
+            
+            # Filter: Top Picks (Sorted by TQS in Engine)
+            # Ensure Sorting is robust (Handle String/Int mix from DB)
+            try:
+                results.sort(key=lambda x: (int(x.get('TQS', 0)), x.get('Confidence')=='EXTREME', -float(x.get('Price', 0))), reverse=True)
+            except: pass # Fallback to engine sort
+            
+            top_picks = results[:6]
+            
+            cols = st.columns(3)
+            for i, item in enumerate(top_picks):
+                with cols[i % 3]:
+                    # Card HTML - Premium Design matching User Request
+                    
+                    # Colors
+                    p_color = "#00F0FF" if "ROCKET" in item['Type'] else "#00E676"
+                    
+                    # Format Prices
+                    price = float(item['Price'])
+                    chg = float(item['Change'])
+                    chg_str = f"{chg:+.2f}%"
+                    chg_color = "#00E676" if chg >= 0 else "#FF5252"
+                    
+                    # Target/Stop (Calculated 2R for display)
+                    risk = max(price - item['Stop'], price*0.01)
             target = price + (2 * risk)
             
             # Font: Source Sans Pro (Injected in CSS)

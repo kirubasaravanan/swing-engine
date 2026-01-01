@@ -679,6 +679,12 @@ class SwingEngine:
         # 1. SMART FILTER (Phase 11)
         target_list = self.get_filtered_universe()
         
+        # FALLBACK: If Smart Filter failed (e.g. Angel Batch API down) and Watchlist is empty,
+        # we still want to show SOMETHING.
+        if not target_list:
+            print("[WARN] Filtered Universe Empty. Falling back to Top 50 Stocks.")
+            target_list = self.universe[:50]
+        
         # 2. Fetch DATA (Targeted)
         # Pass filtered list to fetch_data to avoid fetching 5000 candles
         data_map = self.fetch_data(limit_to_tickers=target_list)
