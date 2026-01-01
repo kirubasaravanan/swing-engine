@@ -1,14 +1,37 @@
 import streamlit as st
 import pandas as pd
 import time
-import engine # Change to direct import for reload
+import engine_v2 as engine # Renamed to force cache invalidation
 import sheets_db
 import os
 import requests
 import logging
 import importlib
+try:
+    import logzero
+    from logzero import logger
+except ImportError:
+    # If logzero not installed yet (should be in reqs), fallback
+    logger = logging.getLogger(__name__)
 
 # --- CONFIG ---
+# Phase 9: Observability
+# Configure centralized logging to file 'swing_engine.log'
+LOG_FILE = os.path.join(os.getcwd(), 'swing_engine.log')
+try:
+    # Check if logzero was imported
+    if 'logzero' in globals():
+        logzero.logfile(LOG_FILE, maxBytes=1e6, backupCount=3)
+except: pass
+
+# Page Config (Must be first ST command)
+st.set_page_config(
+    page_title="Swing Decision Engine (Local)",
+    page_icon="💸",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 # Suppress Threading Warnings
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
 
@@ -17,18 +40,28 @@ CACHE_DIR = "cache"
 if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
 
 # --- CACHE CONTROL (Force Reload Logic) ---
-ENGINE_VERSION = 1.2 # Increment to 1.2 to force reload
+ENGINE_VERSION = 1.6 # Increment to 1.6 to force reload
 if 'engine_version' not in st.session_state or st.session_state['engine_version'] != ENGINE_VERSION:
     print(f"🔄 Detected New Engine Version ({ENGINE_VERSION}). Reloading Module...")
     if 'engine' in st.session_state: del st.session_state['engine']
     if 'scan_results' in st.session_state: del st.session_state['scan_results'] 
     
-    # CRITICAL: Reload the module codepath
-    importlib.reload(engine)
+    # HARD RELOAD: Remove from sys.modules to force fresh import
+    import sys
+    if 'engine_v2' in sys.modules: del sys.modules['engine_v2']
+    if 'market_data' in sys.modules: del sys.modules['market_data'] 
     
+    # Re-run will trigger fresh import at top of script
+    st.session_state['engine_version'] = ENGINE_VERSION
+    time.sleep(0.1) 
     st.session_state['engine_version'] = ENGINE_VERSION
     time.sleep(0.1) 
     st.rerun()
+    
+try:
+    # Debug Engine Path
+    print(f"[DEBUG] Engine Loaded from: {engine.__file__}")
+except: pass
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -90,8 +123,7 @@ st.markdown("""
 @st.cache_resource
 def get_engine():
     # Use module reference to support reloading
-    import importlib
-    import engine
+    import engine_v2 as engine
     importlib.reload(engine)
     return engine.SwingEngine()
 
@@ -104,9 +136,14 @@ ENGINE_VERSION = "1.2" # Increment this to force reload
 pos_data = [] # Default
 if 'scan_results' not in st.session_state:
     st.session_state['scan_results'] = []
-    # Try Load from DB
+    # Try Load from DB (Unless explicitly ignored via Purge)
     import sheets_db
-    cached_res, updated_at, err_msg = sheets_db.fetch_scan_results()
+    if st.session_state.get('ignore_db'):
+        cached_res, updated_at, err_msg = [], None, "Cache Purged"
+        # Reset flag so next refresh works
+        # del st.session_state['ignore_db'] # Keep it until scan runs? No, reset now
+    else:
+        cached_res, updated_at, err_msg = sheets_db.fetch_scan_results()
     
     if cached_res:
         st.session_state['scan_results'] = cached_res
@@ -185,18 +222,89 @@ with st.sidebar:
                 st.success(msg)
             else:
                 st.error(msg)
+
+    # --- DEV TOOLS (Top Level) ---
+    with st.expander("🛠️ Developer Tools & Logs", expanded=False):
+        st.markdown("### 🏆 Performance")
+        if st.button("Run Benchmark Scan"):
+            start = time.time()
+            results = st.session_state['engine'].scan() 
+            st.session_state['scan_results'] = results
+            # Save to DB to persist the fix
+            import sheets_db
+            sheets_db.save_scan_results(results)
+            
+            end = time.time()
+            st.balloons()
+            st.success(f"Response Time: {end-start:.2f}s")
+            time.sleep(1)
+            st.rerun()
+
+        st.markdown("### 🗑️ Cache Control")
+        if st.button("Purge Cache (Fix Data)", type="primary"):
+            try:
+                import glob
+                files = glob.glob(os.path.join("cache", "*.parquet"))
+                for f in files: os.remove(f)
                 
-        # Performance Verification (Hidden Dev Tool)
-        if st.checkbox("Show Dev Tools"):
-            if st.button("🏆 PERFORMANCE TEST"):
-                start = time.time()
-                # Run small universe first to warm up cache if needed, or full
-                # Let's run full to prove 250 stocks speed
-                st.session_state['engine'].scan() 
-                end = time.time()
-                st.balloons()
-                st.success(f"✅ PASS: Scan completed in {end-start:.2f}s")
-                st.info(f"Using: {len(st.session_state['engine'].universe)} Stocks")
+                # Clear State
+                for key in ['market_cache', 'scan_results', 'engine']:
+                    if key in st.session_state: del st.session_state[key]
+                st.session_state['last_scan_time'] = 0
+                st.session_state['ignore_db'] = True # Prevent reloading bad data from cloud
+                
+                st.toast("Cache Purged! 🧹")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+        
+        st.markdown("### 📜 System Logs")
+        if os.path.exists("swing_engine.log"):
+            with open("swing_engine.log", "r") as f:
+                lines = f.readlines()
+                st.code("".join(lines[-50:]), language="bash")
+        else:
+            st.info("No logs yet.")
+
+        st.markdown("### 🔑 Secrets Check")
+        if 'discord_webhook' in st.secrets: st.success("Webhook: OK")
+        else: st.warning("Webhook: Missing")
+
+        st.markdown("### 🔬 Data Inspector")
+        insp_ticker = st.text_input("Inspect Symbol", value="TCS.NS")
+        if st.button("Show Raw Data"):
+            # Auto-fix suffix
+            if not insp_ticker.endswith(".NS") and not insp_ticker.endswith(".BO"):
+                insp_ticker += ".NS"
+            
+            st.info(f"Fetching data for: {insp_ticker}")
+            
+            if 'engine' in st.session_state:
+                import market_data
+                try:
+                    # Daily
+                    d1 = market_data.incremental_fetch(insp_ticker, "1d", "1y")
+                    if d1 is None or d1.empty:
+                        st.error(f"❌ Daily Data (1D) returned EMPTY for {insp_ticker}.")
+                        st.warning("Possible Causes: 1. Invalid Symbol 2. Angel One Login Failed 3. Internet Issue")
+                        if os.path.exists("swing_engine.log"):
+                             st.caption("Check System Logs for 'Angel Download Error'.")
+                    else:
+                        st.success(f"✅ Daily Data: {len(d1)} rows. Last: {d1.index[-1]}")
+                        st.write("Last 5 Rows (Close Price Check):")
+                        st.dataframe(d1.tail(5)[['Open','High','Low','Close','Volume']])
+                    
+                    # Hourly
+                    h1 = market_data.incremental_fetch(insp_ticker, "1h", "1mo")
+                    if h1 is not None and not h1.empty:
+                        st.write(f"✅ Hourly Data: {len(h1)} rows. Last: {h1.index[-1]}")
+                    else:
+                        st.warning("Hourly Data Empty.")
+                        
+                except Exception as e:
+                    st.error(f"Inspector Crash: {e}")
+
                 
 
     # --- SCANNING LOGIC (Time-Gated) ---
@@ -219,6 +327,7 @@ with st.sidebar:
     btn_label = "RUN SCAN 🚀" if is_scan_ready else f"Wait {time_left//60}m {time_left%60}s ⏳"
     
     if st.button(btn_label, type="primary", disabled=not is_scan_ready):
+        st_time = time.time() # Phase 8: Timer
         st.session_state['last_scan_time'] = time.time()
         with st.status("🚀 Initializing Scan Sequence...", expanded=True) as status:
             
@@ -243,6 +352,8 @@ with st.sidebar:
             
             status.update(label="✅ Scan Complete!", state="complete", expanded=False)
             
+        elapsed = time.time() - st_time
+        st.toast(f"⏱️ Scan Completed in {elapsed:.2f}s")
         time.sleep(1)
         st.rerun()
 
@@ -278,7 +389,7 @@ if not st.session_state['authenticated']:
         if "passwords" in st.secrets:
             st.success("✅ Secrets Loaded")
         else:
-            st.warning("⚠️ Secrets Not Found (Using default 'swing123')")
+            st.warning("⚠️ Secrets Not Found.")
             
         st.write(f"Session Auth: {st.session_state['authenticated']}")
         
@@ -294,13 +405,14 @@ except Exception as e:
 
 # --- MAIN DASHBOARD (Protected) ---
 try:
-    ENGINE_VERSION = "1.2" 
-    if 'engine_version' not in st.session_state or st.session_state['engine_version'] != ENGINE_VERSION:
-        if 'engine' in st.session_state: del st.session_state['engine']
-        st.session_state['engine_version'] = ENGINE_VERSION
-
+    # Engine Check
     if 'engine' not in st.session_state:
         st.session_state['engine'] = get_engine()
+        # Verify Universe
+        u_size = len(st.session_state['engine'].universe)
+        print(f"[DEBUG] Engine Instantiated. Universe Size: {u_size}")
+        if u_size < 100:
+             print(f"[CRITICAL] Universe is TRUNCATED! ({st.session_state['engine'].universe})")
 except Exception as e:
     st.error(f"❌ Critical Engine Init Error: {e}")
     st.stop()
@@ -320,16 +432,75 @@ with tab_watchlist:
     c_wl_btn, c_wl_info = st.columns([1, 3])
     with c_wl_btn:
         if st.button("🔄 Update Watchlist", type="primary"):
+            st_time = time.time() # Benchmark
             with st.spinner("Scanning Universe for Gems..."):
                 added = st.session_state['engine'].update_watchlist()
+                elapsed = time.time() - st_time
                 st.success(f"Updated! Watchlist now has {len(added)} stocks.")
+                st.toast(f"⏱️ Task Completed in {elapsed:.2f}s")
                 time.sleep(1)
                 st.rerun()
                 
     wl_data = sheets_db.fetch_watchlist()
     if wl_data:
         df_wl = pd.DataFrame(wl_data)
-        st.dataframe(df_wl, use_container_width=True)
+        
+        # --- WATCHLIST 2.0 LOGIC ---
+        # Ensure Schema Compatibility
+        required_cols = ['Symbol', 'Price', 'current_tqs', 'status', 'exit_reason', 'max_tqs']
+        for c in required_cols:
+            if c not in df_wl.columns:
+                df_wl[c] = None # Fill missing
+                
+        # Fill Defaults
+        df_wl['status'] = df_wl['status'].fillna('ACTIVE')
+        df_wl['exit_reason'] = df_wl['exit_reason'].fillna('')
+        
+        # Metrics
+        n_active = len(df_wl[df_wl['status'].isin(['ACTIVE', 'OPEN_POSITION'])])
+        n_archived = len(df_wl) - n_active
+        
+        c_tog, c_met = st.columns([1, 2])
+        with c_tog:
+            show_history = st.toggle("Show Archived (ML Data)", value=False)
+        with c_met:
+            st.caption(f"📊 **Active**: {n_active} | **Archived**: {n_archived} (Training Set)")
+
+        # Filter View
+        if not show_history:
+            df_display = df_wl[df_wl['status'].isin(['ACTIVE', 'OPEN_POSITION'])].copy()
+        else:
+            df_display = df_wl.copy()
+            
+        # Sort: Open Positions First, then TQS
+        # Helper for sort order
+        def get_sort_key(row):
+            s = row.get('status', 'ACTIVE')
+            t = row.get('current_tqs', 0)
+            if s == 'OPEN_POSITION': return 100 + t
+            if s == 'ACTIVE': return 50 + t
+            return t # Inactive last
+            
+        try:
+            df_display['sort_key'] = df_display.apply(get_sort_key, axis=1)
+            df_display = df_display.sort_values('sort_key', ascending=False).drop(columns=['sort_key'])
+        except: pass
+
+        st.dataframe(
+            df_display, 
+            use_container_width=True,
+            column_config={
+                "status": st.column_config.TextColumn("Status", help="Active/Inactive"),
+                "max_tqs": st.column_config.NumberColumn("Max TQS", format="%.0f"),
+                "current_tqs": st.column_config.ProgressColumn("Current TQS", min_value=0, max_value=10, format="%d"),
+                "Price": st.column_config.NumberColumn("Price", format="₹%.2f"),
+                "added_date": st.column_config.DateColumn("Added Date", format="YYYY-MM-DD"),
+                "days_tracked": st.column_config.NumberColumn("Days", format="%d"),
+                "exit_reason": st.column_config.TextColumn("Exit Reason", help="Why it was removed")
+            },
+            hide_index=True,
+            column_order=["Symbol", "current_tqs", "Price", "added_date", "days_tracked", "status", "exit_reason"]
+        )
     else:
         st.info("Watchlist is empty. Click Update to scan the universe.")
 
@@ -554,6 +725,11 @@ else:
     st.subheader("🔥 Top Picks")
     
     # Filter: Top Picks (Sorted by TQS in Engine)
+    # Ensure Sorting is robust (Handle String/Int mix from DB)
+    try:
+        results.sort(key=lambda x: (int(x.get('TQS', 0)), x.get('Confidence')=='EXTREME', -float(x.get('Price', 0))), reverse=True)
+    except: pass # Fallback to engine sort
+    
     top_picks = results[:6]
     
     cols = st.columns(3)

@@ -1,18 +1,29 @@
-name: Swing Bot (1HR Auto)
+name: Swing Bot (Production)
 
 on:
   schedule:
-    # Runs at minute 15 and 45 past every hour from 3 through 10 UTC (approx 8:45 AM - 3:45 PM IST)
-    # This covers Market Open (9:15) to Close (3:30) with 30-min intervals
-    - cron: '15,45 3-10 * * 1-5'
+    # Schedule (Mon-Fri)
+    # 09:10 IST (Pre-Market) -> 03:40 UTC
+    - cron: '40 3 * * 1-5'
+    # 09:30 IST (Open/Trade) -> 04:00 UTC
+    - cron: '0 4 * * 1-5'
+    # 11:30 IST (Trade)      -> 06:00 UTC
+    - cron: '0 6 * * 1-5'
+    # 13:00 IST (Trade)      -> 07:30 UTC
+    - cron: '30 7 * * 1-5'
+    # 15:10 IST (Trade)      -> 09:40 UTC
+    - cron: '40 9 * * 1-5'
+    # 16:30 IST (Post-Market)-> 11:00 UTC
+    - cron: '0 11 * * 1-5'
+    
   workflow_dispatch:
 
 jobs:
   swing-bot:
     runs-on: ubuntu-latest
-
+    
     steps:
-    - name: Checkout
+    - name: Checkout Code
       uses: actions/checkout@v3
 
     - name: Set up Python
@@ -20,12 +31,41 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Install dependencies
+    - name: Install Dependencies
       run: |
         pip install -r requirements.txt
-
-    - name: Run Swing Bot
+        
+    - name: Run Bot (One-Shot Cloud Mode)
       env:
         GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
       run: |
+        # Create .streamlit directory
+        mkdir -p .streamlit
+
+        # --- 1. ADMIN PASSWORD ---
+        echo "[passwords]" > .streamlit/secrets.toml
+        echo "admin = \"swing123\"" >> .streamlit/secrets.toml # Default logic fallback
+        
+        # --- 2. DISCORD WEBHOOKS ---
+        # User defined "DISCORD_WEBHOOKS" (Plural). We try to use it for both channels.
+        GENERIC_HOOK="${{ secrets.DISCORD_WEBHOOKS }}"
+        
+        if [ -n "$GENERIC_HOOK" ]; then
+           echo "discord_webhook_bot = \"$GENERIC_HOOK\"" >> .streamlit/secrets.toml
+           echo "discord_webhook_stocks = \"$GENERIC_HOOK\"" >> .streamlit/secrets.toml
+        else
+           # Fallback if specific keys exist
+           echo "discord_webhook_bot = \"${{ secrets.DISCORD_WEBHOOK_BOT }}\"" >> .streamlit/secrets.toml
+           echo "discord_webhook_stocks = \"${{ secrets.DISCORD_WEBHOOK_STOCKS }}\"" >> .streamlit/secrets.toml
+        fi
+        
+        # --- 3. ANGEL ONE CREDENTIALS ---
+        # If user added the TOML block in ANGEL_ONE_CREDENTIALS, we append it.
+        ANGEL_SECRETS="${{ secrets.ANGEL_ONE_CREDENTIALS }}"
+        if [ -n "$ANGEL_SECRETS" ]; then
+            echo "" >> .streamlit/secrets.toml
+            echo "$ANGEL_SECRETS" >> .streamlit/secrets.toml
+        fi
+
+        # Run Bot
         python swing_bot.py
