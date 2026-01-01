@@ -97,14 +97,7 @@ def get_engine():
 
 # Version Control for Session State
 ENGINE_VERSION = "1.2" # Increment this to force reload
-if 'engine_version' not in st.session_state or st.session_state['engine_version'] != ENGINE_VERSION:
-    st.toast("⚙️ Detected New Engine Version (1.2). Reloading Module...")
-    if 'engine' in st.session_state:
-        del st.session_state['engine']
-    st.session_state['engine_version'] = ENGINE_VERSION
-
-if 'engine' not in st.session_state:
-    st.session_state['engine'] = get_engine()
+# Engine init moved to Post-Auth block
 
 # --- INITIALIZE DATA ---
 # --- INITIALIZE DATA ---
@@ -296,6 +289,18 @@ except Exception as e:
     st.stop()
 
 # --- MAIN DASHBOARD (Protected) ---
+try:
+    ENGINE_VERSION = "1.2" 
+    if 'engine_version' not in st.session_state or st.session_state['engine_version'] != ENGINE_VERSION:
+        if 'engine' in st.session_state: del st.session_state['engine']
+        st.session_state['engine_version'] = ENGINE_VERSION
+
+    if 'engine' not in st.session_state:
+        st.session_state['engine'] = get_engine()
+except Exception as e:
+    st.error(f"❌ Critical Engine Init Error: {e}")
+    st.stop()
+    
 st.title("Swing Decision Radar 📡")
 
 # TABS
