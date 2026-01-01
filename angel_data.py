@@ -12,7 +12,24 @@ import time
 
 class AngelDataManager:
     def __init__(self):
-        self.manager = AngelOneManager()
+        # 1. Try to Reuse Existing Session from Streamlit (if available)
+        try:
+             import streamlit as st
+             if hasattr(st, 'session_state') and 'angel_client' in st.session_state:
+                 self.manager = st.session_state['angel_client']
+                 print("✅ AngelDataManager: Reusing Active Session from App.")
+             else:
+                 raise Exception("No Session Found")
+        except:
+             # 2. Fresh Login (For Bot / First Run)
+             print("🔄 AngelDataManager: Initiating Fresh Login...")
+             self.manager = AngelOneManager()
+             success, msg = self.manager.login()
+             if not success:
+                 print(f"❌ AngelDataManager Login Failed: {msg}")
+             else:
+                 print("✅ AngelDataManager: Login Success.")
+
         self.symbol_map = {} # {"SBIN-EQ": "3045"}
         self.token_map = {}  # {"3045": "SBIN-EQ"}
         self._load_instruments()
