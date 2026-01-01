@@ -139,10 +139,13 @@ with st.sidebar:
     
     st.write("---")
     
-    # Universe Stats
-    u_len = len(st.session_state['engine'].universe)
-    st.markdown(f"**⚡ Active Universe**: `{u_len}` Stocks")
-    st.caption("Nifty Midcap 100 + Smallcap 100")
+    # Universe Stats (Guarded)
+    if 'engine' in st.session_state:
+        u_len = len(st.session_state['engine'].universe)
+        st.markdown(f"**⚡ Active Universe**: `{u_len}` Stocks")
+        st.caption("Nifty Midcap 100 + Smallcap 100")
+    else:
+        st.info("🔒 Login to View Universe")
 
     # Angel One Status
     st.markdown("---")
@@ -151,16 +154,17 @@ with st.sidebar:
     else:
          st.warning("🟠 Using Parquet/Cache")
     
-    with st.expander("Edit / Custom Tickers"):
-        ticker_input = st.text_area(
-            "Add Custom (Comma Separated)", 
-            value=",".join([t.replace(".NS", "") for t in st.session_state['engine'].universe[:10]]),
-            height=100
-        )
-        if st.button("Update List"):
-            new_list = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
-            st.session_state['engine'].set_universe(new_list)
-            st.rerun()
+    if 'engine' in st.session_state:
+        with st.expander("Edit / Custom Tickers"):
+            ticker_input = st.text_area(
+                "Add Custom (Comma Separated)", 
+                value=",".join([t.replace(".NS", "") for t in st.session_state['engine'].universe[:10]]),
+                height=100
+            )
+            if st.button("Update List"):
+                new_list = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+                st.session_state['engine'].set_universe(new_list)
+                st.rerun()
 
     st.markdown("---")
     
