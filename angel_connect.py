@@ -18,10 +18,31 @@ load_dotenv()
 
 class AngelOneManager:
     def __init__(self):
+
+        # 1. Try OS Environ (Local / Docker)
         self.api_key = os.getenv("ANGEL_API_KEY")
         self.client_id = os.getenv("ANGEL_CLIENT_ID")
         self.password = os.getenv("ANGEL_PIN")
         self.totp_key = os.getenv("ANGEL_TOTP_KEY")
+        
+        # 2. Try Streamlit Secrets (Cloud Fallback)
+        try:
+            import streamlit as st
+            if not self.api_key and "ANGEL_API_KEY" in st.secrets:
+                 self.api_key = st.secrets["ANGEL_API_KEY"]
+                 self.client_id = st.secrets["ANGEL_CLIENT_ID"]
+                 self.password = st.secrets["ANGEL_PIN"]
+                 self.totp_key = st.secrets["ANGEL_TOTP_KEY"]
+            
+            # 3. Handle User's specific nesting (Under [passwords])
+            if not self.api_key and "passwords" in st.secrets and "ANGEL_API_KEY" in st.secrets["passwords"]:
+                 sec = st.secrets["passwords"]
+                 self.api_key = sec["ANGEL_API_KEY"]
+                 self.client_id = sec["ANGEL_CLIENT_ID"]
+                 self.password = sec["ANGEL_PIN"]
+                 self.totp_key = sec["ANGEL_TOTP_KEY"]
+        except: pass
+
         self.smart_api = None
         self.auth_token = None
 
