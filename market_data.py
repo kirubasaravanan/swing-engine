@@ -23,14 +23,22 @@ def incremental_fetch(symbol, interval="1d", period="1y"):
     4. Returns DataFrame.
     """
     
-    # 0. Memory Cache (Session State) - Fastest
+    # 0. Memory Cache (Session State or Global)
     mem_key = f"market_{symbol}_{interval}"
-    if 'market_cache' not in st.session_state:
-        st.session_state.market_cache = {}
+    
+    # Global fallback for Bot
+    global _MEM_CACHE
+    if '_MEM_CACHE' not in globals(): _MEM_CACHE = {}
+
+    if st is not None and hasattr(st, 'session_state'):
+        if 'market_cache' not in st.session_state:
+            st.session_state.market_cache = {}
+        cache_store = st.session_state.market_cache
+    else:
+        cache_store = _MEM_CACHE
         
-    if mem_key in st.session_state.market_cache:
-        # We could add a TTL here if needed, but for a 15 min session it's fine
-        return st.session_state.market_cache[mem_key]
+    if mem_key in cache_store:
+        return cache_store[mem_key]
 
     path = get_cache_path(symbol, interval)
     existing_df = pd.DataFrame()
@@ -129,9 +137,29 @@ def incremental_fetch(symbol, interval="1d", period="1y"):
         final_df = existing_df
 
     # 4. Update Memory Cache
-    st.session_state.market_cache[mem_key] = final_df
+    cache_store[mem_key] = final_df
     
     return final_df
+
+def get_bulk_snapshot(symbols):
+    """
+    Fetches real-time snapshot (LTP, Change, Vol) for filtering.
+    """
+    if not symbols: return pd.DataFrame()
+    
+    # 1. Angel One
+    try:
+        if st is not None and hasattr(st, 'session_state') and 'angel_mgr' in st.session_state:
+            mgr = st.session_state.angel_mgr
+        else:
+            from angel_data import AngelDataManager
+            mgr = AngelDataManager()
+            
+        return mgr.fetch_market_data_batch(symbols, mode="FULL")
+        
+    except Exception as e:
+        print(f"Bulk Snapshot Error: {e}")
+        return pd.DataFrame()
 
 def clear_cache():
     """Utils to clear cache if things break"""

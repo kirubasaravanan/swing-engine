@@ -8,6 +8,8 @@ from angel_connect import AngelOneManager
 INSTRUMENT_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 INSTRUMENT_FILE = "angel_instruments.json"
 
+import time
+
 class AngelDataManager:
     def __init__(self):
         self.manager = AngelOneManager()
@@ -131,6 +133,73 @@ class AngelDataManager:
         except Exception as e:
             print(f"❌ Fetch Error {symbol}: {e}")
             return pd.DataFrame()
+
+    def fetch_market_data_batch(self, symbols, mode="FULL"):
+        """
+        Fetch Real-Time Data for multiple symbols (Max 50 per batch safe).
+        mode: "LTP", "OHLC", "FULL"
+        Returns DataFrame with Symbol index.
+        """
+        # 1. Map Symbols to Tokens
+        token_map = {} # {token: symbol}
+        tokens = []
+        for s in symbols:
+            t = self.get_token(s)
+            if t:
+                tokens.append(t)
+                token_map[t] = s
+                
+        # 2. Batching (API limit usually 50)
+        BATCH_SIZE = 50
+        all_results = []
+        
+        for i in range(0, len(tokens), BATCH_SIZE):
+            batch = tokens[i:i+BATCH_SIZE]
+            
+            try:
+                # Mode "FULL" gives LTP, Open, High, Low, Close, Volume, LastTradeQty, etc.
+                params = {
+                    "mode": mode,
+                    "exchangeTokens": {
+                        "NSE": batch
+                    }
+                }
+                
+                res = self.manager.smart_api.getMarketData(params)
+                
+                if res['status'] and res['data']:
+                    all_results.extend(res['data']) # List of dicts
+                    
+                time.sleep(0.25) # Throttle (4 req/sec max)
+                    
+            except Exception as e:
+                print(f"⚠️ Market Data Batch Failed: {e}")
+                
+        # 3. Process Result
+        if not all_results: return pd.DataFrame()
+        
+        # Format: {'tradingSymbol': '...', 'symbolToken': '...', 'ltp': ...}
+        data = []
+        for item in all_results:
+            tok = item.get('symbolToken')
+            sym = token_map.get(tok)
+            if not sym: continue
+            
+            # Extract Keys based on mode
+            row = {'Symbol': sym}
+            if 'ltp' in item: row['LTP'] = float(item['ltp'])
+            if 'percentChange' in item: row['Change'] = float(item['percentChange'])
+            if 'netChange' in item: row['PtsChange'] = float(item['netChange'])
+            if 'volume' in item: row['Volume'] = int(item['volume'])
+            # Full OHLCa
+            if 'open' in item: row['Open'] = float(item['open'])
+            if 'high' in item: row['High'] = float(item['high'])
+            if 'low' in item: row['Low'] = float(item['low'])
+            if 'close' in item: row['Close'] = float(item['close']) # Previous Close often
+            
+            data.append(row)
+            
+        return pd.DataFrame(data).set_index('Symbol')
 
 if __name__ == "__main__":
     with open("angel_data_debug.log", "w", encoding="utf-8") as f:
