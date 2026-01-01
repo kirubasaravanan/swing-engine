@@ -131,8 +131,34 @@ def get_engine():
 ENGINE_VERSION = "1.2" # Increment this to force reload
 # Engine init moved to Post-Auth block
 
+# --- INITIALIZE CONNECTION ---
+@st.cache_resource
+def init_connection():
+    """Initializes Angel One Connection once."""
+    try:
+        from angel_connect import AngelOneManager
+        mgr = AngelOneManager()
+        success, msg = mgr.login()
+        if success:
+            return mgr
+        else:
+            print(f"Login Failed: {msg}")
+            return None
+    except Exception as e:
+        print(f"Connection Error: {e}")
+        return None
+
+if 'angel_client' not in st.session_state:
+    conn = init_connection()
+    if conn:
+        st.session_state['angel_client'] = conn.manager if hasattr(conn, 'manager') else conn
+        st.session_state['angel_mgr'] = conn # For Sidebar check
+        st.session_state['angel_api_status'] = True
+    else:
+        st.session_state['angel_api_status'] = False
+
 # --- INITIALIZE DATA ---
-# --- INITIALIZE DATA ---
+import sheets_db
 pos_data = [] # Default
 if 'scan_results' not in st.session_state:
     st.session_state['scan_results'] = []
