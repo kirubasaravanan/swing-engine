@@ -713,7 +713,7 @@ with tab_radar:
             st.warning("⚠️ Scan Completed: No stocks met the entry criteria (High Volatility + TQS).")
             st.caption("Try checking 'Force Scan' or waiting for market hours.")
         else:
-        else:
+
             # --- METRICS ROW ---
             col1, col2, col3 = st.columns(3)
             c_high = len([r for r in results if r['Confidence'] == 'EXTREME'])

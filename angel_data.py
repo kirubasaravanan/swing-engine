@@ -36,28 +36,41 @@ class AngelDataManager:
                     f.write(r.content)
             except Exception as e:
                 print(f"❌ Failed to download instruments: {e}")
-                # Fallback to existing if available
-                if not os.path.exists(INSTRUMENT_FILE): return
+                
+        # Validate File Size (Avoid empty file crashes)
+        if os.path.exists(INSTRUMENT_FILE) and os.path.getsize(INSTRUMENT_FILE) < 1024:
+             print("⚠️ Instrument File too small. Re-downloading...")
+             try:
+                r = requests.get(INSTRUMENT_URL)
+                with open(INSTRUMENT_FILE, "wb") as f: f.write(r.content)
+             except: pass
 
         # Load into memory (Naive Load)
-        # Optimized: Only load NSE Equity to save RAM
-        print("⚡ Loading Instrument Map...")
+        print("⚡ Loading Instrument Map (Heavy Operation)...")
         try:
             with open(INSTRUMENT_FILE, "r") as f:
                 data = json.load(f)
                 
+            count = 0
             for item in data:
+                # Optimized: Only store NSE Equity
                 if item.get('exch_seg') == 'NSE' and '-EQ' in item.get('symbol'):
-                    sym = item['symbol'] # e.g. SBIN-EQ
+                    sym = item['symbol']
                     tok = item['token']
                     self.symbol_map[sym] = tok
                     self.token_map[tok] = sym
                     
-                    # Also map without suffix for easier lookup
+                    # Clean map
                     clean_sym = sym.replace('-EQ', '')
                     self.symbol_map[clean_sym] = tok
+                    count += 1
+            
+            # Explicit Memory Cleanup
+            del data
+            import gc
+            gc.collect()
                     
-            print(f"✅ Loaded {len(self.symbol_map)} NSE Equity Symbols")
+            print(f"✅ Loaded {count} NSE Equity Symbols")
             
         except Exception as e:
             print(f"❌ Error parsing instruments: {e}")
