@@ -213,7 +213,8 @@ st.session_state['portfolio'] = pos_data if pos_data else []
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚡ Decision Engine")
+    st.title("⚡ Decision Engine")
+    st.toast("Cloud v1.1 Active ☁️")
     
     # Bucket Status (Now Synced)
     pf_count = len(st.session_state['portfolio'])
