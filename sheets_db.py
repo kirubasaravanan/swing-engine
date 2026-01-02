@@ -172,7 +172,13 @@ def add_trade(symbol, entry, qty=1, stop=0, tqs=0):
     save_local_db(db)
     
     # 2. Push Cloud (Background Sync)
-    push_portfolio_to_cloud(db["portfolio"])
+    try:
+         if push_portfolio_to_cloud(db["portfolio"]):
+             print(f"Added {symbol} to Cloud.")
+         else:
+             print(f"Added {symbol} Local ONLY. Cloud Push Failed.")
+    except:
+         print(f"Added {symbol} Local ONLY. Cloud Push Exception.")
     return True
 
 

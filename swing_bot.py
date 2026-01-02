@@ -117,9 +117,33 @@ def run_cycle(scheduled_time):
              for ex in exits:
                  if "EXIT" in ex['Action'] or "BOOK" in ex['Action']:
                      logger.info(f"   🚨 SELL: {ex['Symbol']}")
-                     if discord: discord.notify_exit_signal(ex['Symbol'], ex['Reason'], ex['Current'])
-                     # Archive logic...
+                     if discord: discord.notify_exit_signal(ex['Symbol'], ex['Reason'], ex['Price'])
+                     
+                     # 1. ARCHIVE (Save History)
+                     try:
+                         # Get original trade data
+                         row = trades_df[trades_df['Symbol'] == ex['Symbol']].iloc[0]
+                         t_data = row.to_dict()
+                         
+                         # Add Exit Details
+                         t_data['Exit'] = ex['Price']
+                         t_data['ExitDate'] = datetime.now().strftime("%Y-%m-%d")
+                         t_data['Reason'] = ex['Reason']
+                         
+                         # Calculate Realized PnL
+                         entry = float(t_data.get('Entry', 0))
+                         qty = float(t_data.get('Qty', 1))
+                         exit_p = float(ex['Price'])
+                         t_data['PnL'] = (exit_p - entry) * qty
+                         
+                         sheets_db.archive_trade(t_data)
+                         logger.info(f"   📜 Archived {ex['Symbol']} PnL: {t_data['PnL']:.2f}")
+                     except Exception as e:
+                         logger.error(f"Archive Failed: {e}")
+
+                     # 2. DELETE (Free Slot)
                      sheets_db.delete_trade(ex['Symbol'])
+                     
                      # Re-fetch for next step
                      trades_df = trades_df[trades_df['Symbol'] != ex['Symbol']]
 
