@@ -335,8 +335,10 @@ with st.sidebar:
             st.info("No logs yet.")
 
         st.markdown("### 🔑 Secrets Check")
-        if 'discord_webhook' in st.secrets: st.success("Webhook: OK")
-        else: st.warning("Webhook: Missing")
+        if 'discord_webhook' in st.secrets or 'discord_webhook_bot' in st.secrets: 
+            st.success("Webhook: OK")
+        else: 
+            st.warning("Webhook: Missing")
 
         st.markdown("### 🔬 Data Inspector")
         insp_ticker = st.text_input("Inspect Symbol", value="TCS.NS")
