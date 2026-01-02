@@ -91,8 +91,17 @@ def incremental_fetch(symbol, interval="1d", period="1y"):
         if period == "5y": days_to_fetch = 1500
         
         # If increment, just fetch last 5 days to be safe and cover holidays
+        # If increment, calculate gap
         if start_date:
-            days_to_fetch = 10 
+            try:
+                # Convert string back to datetime for calc
+                last_dt_obj = pd.to_datetime(start_date)
+                gap_days = (datetime.datetime.now() - last_dt_obj).days
+                # Fetch gap + 1 buffer day (to update current candle)
+                days_to_fetch = max(1, gap_days + 1)
+            except:
+                days_to_fetch = 10 # Fallback
+ 
             
         angel_interval = "ONE_DAY"
         if interval == "1h": angel_interval = "ONE_HOUR"

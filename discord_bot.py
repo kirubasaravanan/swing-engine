@@ -52,47 +52,49 @@ class DiscordBot:
         """Summary of Daily Scan -> BOT CHANNEL"""
         if not candidates: return
         
-        top_5 = candidates[:5]
+        # FILTER: Only TSQ >= 9 as per user request
+        top_picks = [c for c in candidates if int(c.get('TQS', 0)) >= 9]
+        
+        # Sort by TSQ desc
+        top_picks.sort(key=lambda x: int(x.get('TQS', 0)), reverse=True)
+        top_picks = top_picks[:10] # Cap at top 10 to avoid spam
+        
+        if not top_picks:
+             # Optional: Notify that scan finished but nothing huge found
+             self.notify_job_status("✅ Scan Complete. No TSQ 9/10 found.", is_error=False)
+             return
+
         field_list = []
-        for c in top_5:
+        for c in top_picks:
+            # Emoji for TSQ
+            icon = "🔥" if int(c.get('TQS', 0)) == 10 else "⚡"
+            
             field_list.append({
-                "name": f"{c.get('Symbol')} (TQS: {c.get('TQS')})",
+                "name": f"{icon} {c.get('Symbol')} (TQS: {c.get('TQS')})",
                 "value": f"Price: {c.get('Price')} | Conf: {c.get('Confidence', 'N/A')}",
                 "inline": False
             })
             
         self.send_embed(
-            title="📊 Market Scan Complete",
-            description=f"Found {len(candidates)} potential candidates.",
-            color=0x3498db, # Blue
+            title="💎 Top High-Quality Picks (TSQ 9-10)",
+            description=f"Scan complete. Found {len(top_picks)} elite candidates.",
+            color=0x9b59b6, # Purple
             fields=field_list,
-            webhook_url=self.url_bot  # <--- Routing
+            webhook_url=self.url_stocks  # <--- Send to Stocks Channel
         )
 
-    def notify_new_entry(self, symbol, price, tqs):
-        """New Entry -> STOCKS CHANNEL"""
+    def notify_market_update(self, pf_count, wl_count, top_picks_count):
+        """General Market Update -> BOT CHANNEL"""
         self.send_embed(
-            title="📈 New Watchlist Candidate",
-            description=f"**{symbol}** added to Watchlist.",
-            color=0x2ecc71, # Green
+            title="📊 Market Snapshot",
+            description="Swing Engine Update",
+            color=0x34495e, # Dark Blue
             fields=[
-                {"name": "Price", "value": str(price), "inline": True},
-                {"name": "TQS Score", "value": f"{tqs}/10", "inline": True}
+                {"name": "💼 Portfolio", "value": f"{pf_count} Active Positions", "inline": True},
+                {"name": "⭐ Watchlist", "value": f"{wl_count} Tracked Stocks", "inline": True},
+                {"name": "🔥 Top Picks", "value": f"{top_picks_count} (TSQ 9-10)", "inline": True}
             ],
-            webhook_url=self.url_stocks # <--- Routing
-        )
-
-    def notify_exit_signal(self, symbol, reason, price):
-        """Exit Signal -> STOCKS CHANNEL"""
-        self.send_embed(
-            title="🚨 Exit Signal Detected",
-            description=f"**{symbol}** flagged for exit.",
-            color=0xe74c3c, # Red
-            fields=[
-                {"name": "Reason", "value": reason, "inline": True},
-                {"name": "Current Price", "value": str(price), "inline": True}
-            ],
-            webhook_url=self.url_stocks # <--- Routing
+            webhook_url=self.url_bot
         )
 
     def notify_job_status(self, message, is_error=False):

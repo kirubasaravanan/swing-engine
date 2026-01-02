@@ -827,6 +827,10 @@ class SwingEngine:
         # 2. Load Existing DB
         current_wl = sheets_db.fetch_watchlist() # List of dicts
         # Create Map for Update: {Symbol: Record}
+        # Ensure 'days_tracked' is int
+        for item in current_wl:
+            if 'days_tracked' not in item: item['days_tracked'] = 0
+            
         wl_map = {item['Symbol']: item for item in current_wl}
         
         # Check Open Positions (Protected)
@@ -868,31 +872,51 @@ class SwingEngine:
                     
                     # ML Stats
                     rec['max_tqs'] = max(rec.get('max_tqs', 0), int(tqs))
-                    if 'days_tracked' not in rec: rec['days_tracked'] = 0
-                    # Increment days logic? Complex without daily batch tracking. 
-                    # For now, just rely on added_date diff if needed.
+        
+                    # Aging: Increment Days Logic (Approximate by run)
+                    # We assume this runs daily. Ideally check date diff.
+                    last_date = rec.get('last_seen_date', '')
+                    today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+                    
+                    if last_date != today_str:
+                        rec['days_tracked'] = rec.get('days_tracked', 0) + 1
+                        rec['last_seen_date'] = today_str
+                        
+                        # Apply Decay if stagnant?
+                        # Rule: If TQS < 7 for 2 days -> Remove? (Handled in Status)
                     
                     # Status Logic
+                    prev_status = rec.get('status', 'ACTIVE')
                     if ticker in open_positions:
                         rec['status'] = 'OPEN_POSITION'
                     elif rev_tqs >= 7:
                         rec['status'] = 'INACTIVE'
                         rec['exit_reason'] = 'REV_TQS_HIGH'
-                    elif tqs < 5:
+                    elif tqs < 6:
                         rec['status'] = 'INACTIVE'
                         rec['exit_reason'] = 'WEAKNESS'
-                    elif tqs >= 8:
+                    elif tqs >= 8 and prev_status == 'INACTIVE':
                         rec['status'] = 'ACTIVE' # Re-Activate
+                        rec['entry_reason'] = 'REACTIVATED_STRONG'
+                    
+                    # Priority Score Calculation (For Ranking)
+                    # Score = (Current TQS * 0.5) + (Max TQS * 0.3) - (Days Tracked * 0.1)
+                    p_score = (int(tqs) * 0.5) + (rec.get('max_tqs', int(tqs)) * 0.3) - (rec.get('days_tracked', 0) * 0.1)
+                    rec['priority_score'] = round(p_score, 2)
                         
                 else:
                     # --- NEW CANDIDATE COLLECTION ---
                     # Don't add yet, collect for sorting/limiting
                     if tqs >= 8:
+                        # Initial Priority
+                        p_score = (int(tqs) * 0.5) + (int(tqs) * 0.3) - (0 * 0.1)
+                        
                         active_candidates.append({
                             'symbol': ticker,
                             'price': float(round(curr_price, 2)),
                             'tqs': int(tqs),
-                            'rev_tqs': int(rev_tqs)
+                            'rev_tqs': int(rev_tqs),
+                            'p_score': round(p_score, 2)
                         })
 
             except Exception as e: continue
@@ -900,11 +924,16 @@ class SwingEngine:
         # --- LOGIC REFINEMENT (PHASE 10) ---
         
         # 1. Processing New Candidates
-        # Rule: Max 5 New Entries Per Day
+        # Rule: Max 10 New Entries Per Day (User Request)
         # Rule: Priority is TQS (High) -> Price (Low) "Cheap & Strong"
         if active_candidates:
-            # Sort: primary key -TQS (Desc), secondary key Price (Asc)
-            active_candidates.sort(key=lambda x: (-x['tqs'], x['price']))
+            # Sort: TQS (High to Low), Price (Low to High)
+            # Logic: We use reverse=True.
+            # TQS: 10 > 9.
+            # Price: We want Low Price first.
+            # If price is 100, -100. If price is 500, -500.
+            # -100 > -500. So Low price comes first.
+            active_candidates.sort(key=lambda x: (x['tqs'], -x['price']), reverse=True)
             
             today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
             
@@ -913,7 +942,8 @@ class SwingEngine:
                                    if v.get('added_date') == today_str 
                                    and v.get('status') in ['ACTIVE', 'OPEN_POSITION'])
             
-            slots_available = max(0, 5 - today_adds_count)
+            # Cap at 10 new adds per day
+            slots_available = max(0, 10 - today_adds_count)
             
             final_adds = active_candidates[:slots_available]
             
@@ -926,13 +956,16 @@ class SwingEngine:
                     'Symbol': sym,
                     'status': 'ACTIVE',
                     'added_date': today_str,
+                    'last_seen_date': today_str,
                     'last_updated': pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
                     'Price': cand['price'],
                     'current_tqs': cand['tqs'],
                     'max_tqs': cand['tqs'],
                     'rev_tqs': cand['rev_tqs'],
                     'exit_reason': '',
-                    'days_tracked': 1
+                    'entry_reason': 'TOP_TSQ_TODAY',
+                    'days_tracked': 1,
+                    'priority_score': cand['p_score']
                 }
                 # DISCORD ALERT
                 if self.discord: self.discord.notify_new_entry(sym, cand['price'], cand['tqs'])
@@ -941,11 +974,11 @@ class SwingEngine:
         # Rule: Protect OPEN_POSITION, keep Highest TQS for others.
         all_active = [k for k,v in wl_map.items() if v.get('status') == 'ACTIVE']
         
-        if len(all_active) > 50:
-            # Sort by TQS Descending (Keep best)
-            all_active.sort(key=lambda sym: wl_map[sym].get('current_tqs', 0), reverse=True)
+        if len(all_active) > 100:
+            # Sort by Priority Score Descending (Keep best)
+            all_active.sort(key=lambda sym: wl_map[sym].get('priority_score', 0), reverse=True)
             
-            to_remove = all_active[50:]
+            to_remove = all_active[100:]
             for sym in to_remove:
                 wl_map[sym]['status'] = 'INACTIVE'
                 wl_map[sym]['exit_reason'] = 'RANK_OVERFLOW'

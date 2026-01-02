@@ -187,6 +187,11 @@ def main():
         # 1. Start
         write_status("RUNNING", "0%", mode)
         
+        try:
+            from discord_bot import DiscordBot
+            DiscordBot().notify_job_status(f"🚀 Background Scan Started (Mode: {mode})")
+        except: pass
+        
         # 2. Get Universe
         universe = get_universe(mode)
         logging.info(f"Universe Size: {len(universe)}")
@@ -208,36 +213,71 @@ def main():
         # 3. Sequential Fetch
         import market_data
         
+        # 3. Two-Phase Scan Strategy
+        import market_data
+        import engine_v2
+        
+        # Temp engine for Light TSQ check
+        temp_eng = engine_v2.SwingEngine()
+        
+        deep_scan_candidates = set()
         total = len(universe)
+        
+        # --- PHASE 1: BROAD SCAN (Daily Data Only) ---
+        write_status("RUNNING", "Phase 1: Broad Scan (Daily)...", mode)
+        
         for i, ticker in enumerate(universe):
-            # Update Progress
-            pct = int((i / total) * 100)
-            write_status("RUNNING", f"{i}/{total} ({pct}%)", mode)
+            pct = int((i / total) * 50) # First 50% of progress bar
+            write_status("RUNNING", f"Daily Scan {i}/{total} ({pct}%)", mode)
             
             try:
-                # OPTIMIZATION: Speed Boost 🚀
-                # If VIP (Watchlist/Portfolio) -> Fetch ALL (1d, 1h, 15m)
-                # If Normal -> Fetch 1d ONLY (Fast)
+                logger.info(f"[{i}/{total}] Fast Fetch {ticker}...")
                 
+                # Fetch Daily (Incremental) - Stores to Parquet
+                df_daily = market_data.incremental_fetch(ticker, "1d", "1y")
+                
+                # Check for Deep Scan Eligibility
                 is_vip = ticker in vip_universe
+                is_high_potential = False
                 
-                if is_vip:
-                     logger.info(f"[{i}/{total}] Deep Fetch {ticker}...")
-                     market_data.incremental_fetch(ticker, "1d", "1y")
-                     market_data.incremental_fetch(ticker, "1h", "1mo")
-                     market_data.incremental_fetch(ticker, "15m", "5d")
-                else:
-                     logger.info(f"[{i}/{total}] Fast Fetch {ticker}...")
-                     market_data.incremental_fetch(ticker, "1d", "1y")
+                if not df_daily.empty and len(df_daily) > 50:
+                    # Quick TSQ Check
+                    light_tqs = temp_eng.calculate_tqs_daily_only(df_daily)
+                    if light_tqs >= 5: # As per user request: TSQ > 5
+                        is_high_potential = True
                 
-                logger.info(f"[{i}/{total}] Done {ticker}")
-                
-                # Rate Limit (Limit 3/sec).
-                # Increased to 1.0s to fix AB1004 errors (API overload)
-                time.sleep(1.0) 
+                if is_vip or is_high_potential:
+                    deep_scan_candidates.add(ticker)
+                    
+                time.sleep(0.25) # Fast throttle for Daily
                 
             except Exception as e:
-                logger.error(f"Fetch failed for {ticker}: {e}")
+                logger.error(f"Daily Fetch failed for {ticker}: {e}")
+
+        # --- PHASE 2: DEEP SCAN (Hourly/15m for Candidates) ---
+        write_status("RUNNING", "Phase 2: Deep Scan (Intraday)...", mode)
+        
+        deep_list = list(deep_scan_candidates)
+        total_deep = len(deep_list)
+        logger.info(f"Deep Scan Candidates: {total_deep} stocks")
+        
+        for i, ticker in enumerate(deep_list):
+            pct = 50 + int((i / total_deep) * 40) # 50% to 90%
+            write_status("RUNNING", f"Deep Scan {i}/{total_deep} ({pct}%)", mode)
+            
+            try:
+                logger.info(f"[{i}/{total_deep}] Deep Fetch {ticker}...")
+                
+                # Fetch Hourly (1 Month) - Optimized Storage
+                market_data.incremental_fetch(ticker, "1h", "1mo")
+                
+                # Fetch 15m (5 Days)
+                market_data.incremental_fetch(ticker, "15m", "5d")
+                
+                time.sleep(1.0) # Slower throttle for heavy data
+                
+            except Exception as e:
+                logger.error(f"Deep Fetch failed for {ticker}: {e}")
                 
         # 4. Aggregation & Swap
         write_status("RUNNING", "Aggregating...", mode)
@@ -261,7 +301,13 @@ def main():
                 
                 # A. Run Scan
                 logger.info("Running Deep Scan...")
-                scan_results = eng.scan(data_map=data_map)
+                
+                def scan_progress(pct_float):
+                    # Map 0.0-1.0 to text progress
+                    p_text = f"Analyzing {int(pct_float*100)}%"
+                    write_status("RUNNING", p_text, mode)
+                    
+                scan_results = eng.scan(data_map=data_map, progress_callback=scan_progress)
                 
                 # Save Scan Results
                 sheets_db.save_scan_results(scan_results)
@@ -296,9 +342,43 @@ def main():
         write_status("COMPLETED", "100%", mode)
         logger.info("Job Completed Successfully.")
         
+        # --- DISCORD ALERTS ---
+        try:
+            from discord_bot import DiscordBot
+            discord = DiscordBot()
+            
+            # 1. Job Complete
+            discord.notify_job_status("✅ Background Scan Completed Successfully.")
+            
+            # 2. Top Picks (TSQ 9-10)
+            if 'scan_results' in locals() and scan_results:
+                discord.notify_scan_complete(scan_results)
+                
+            # 3. Market Snapshot
+            if 'portfolio' in locals() and portfolio:
+                 pf_count = len(portfolio)
+            else: pf_count = 0
+            
+            # Watchlist count (Estimate from vip_universe or load)
+            wl_count = len(vip_universe) if 'vip_universe' in locals() else 0
+            
+            # High TSQ count
+            high_tsq = len([c for c in scan_results if int(c.get('TQS', 0)) >= 9]) if 'scan_results' in locals() else 0
+            
+            discord.notify_market_update(pf_count, wl_count, high_tsq)
+            
+        except Exception as e:
+            logger.error(f"Discord Notification Failed: {e}")
+            
     except Exception as e:
         logger.error(f"Job Critical Error: {e}")
         write_status("FAILED", "Error", mode, str(e))
+        
+        try:
+            from discord_bot import DiscordBot
+            DiscordBot().notify_job_status(f"❌ Job Failed: {e}", is_error=True)
+        except: pass
+        
         sys.exit(1)
 
 if __name__ == "__main__":

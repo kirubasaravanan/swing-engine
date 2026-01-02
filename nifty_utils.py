@@ -74,14 +74,14 @@ def fetch_nifty_csv(url):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     }
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, headers=headers, timeout=2) # Reduced timeout for faster startup
         if r.status_code == 200:
              df = pd.read_csv(io.StringIO(r.text))
              if 'Symbol' in df.columns:
                  ticks = [t.strip() + ".NS" for t in df['Symbol'].tolist()]
                  return ticks
     except Exception as e:
-        print(f"Index Fetch Error: {e}")
+        print(f"⚠️ Index Source Busy ({e}). Switching to Backup List...")
         
     return []
 

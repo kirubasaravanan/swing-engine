@@ -293,6 +293,19 @@ with st.sidebar:
             time.sleep(1)
             st.rerun()
 
+        st.markdown("### 🚑 Emergency");
+        if st.button("Force Unstick (Reset Status)"):
+            try:
+                # Reset Status File
+                with open(status_file, "w") as f:
+                    json.dump({"state": "IDLE", "last_updated": "Forced Reset"}, f)
+                st.session_state['last_scan_time'] = 0
+                st.success("Status Reset! You can start a new scan.")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Reset Failed: {e}")
+
         st.markdown("### 🗑️ Cache Control")
         if st.button("Purge Cache (Fix Data)", type="primary"):
             try:
@@ -670,13 +683,27 @@ with tab_portfolio:
             an_df = pd.DataFrame(analysis)
             if 'Symbol' in an_df.columns:
                 an_df = an_df.drop_duplicates(subset=['Symbol'])
-                # Merge actionable data
-                pos_df = pd.merge(pos_df, an_df[['Symbol', 'Action', 'Reason', 'Days', 'Current']], on='Symbol', how='left')
+                
+                # FIX: Map Engine Keys to App Keys
+                if 'Signal' in an_df.columns: an_df.rename(columns={'Signal': 'Action'}, inplace=True)
+                if 'Price' in an_df.columns: an_df.rename(columns={'Price': 'Current'}, inplace=True)
+                
+                # Merge only what is available
+                wanted_cols = ['Symbol', 'Action', 'Reason', 'Days', 'Current']
+                avail_cols = [c for c in wanted_cols if c in an_df.columns]
+                
+                pos_df = pd.merge(pos_df, an_df[avail_cols], on='Symbol', how='left')
                 
                 # Fill NaNs
-                pos_df['Action'] = pos_df['Action'].fillna('HOLD')
-                pos_df['Reason'] = pos_df['Reason'].fillna('-')
-                pos_df['Days'] = pos_df['Days'].fillna(0).astype(int)
+                # Fill NaNs safely
+                if 'Action' in pos_df.columns: pos_df['Action'] = pos_df['Action'].fillna('HOLD')
+                else: pos_df['Action'] = 'HOLD'
+                
+                if 'Reason' in pos_df.columns: pos_df['Reason'] = pos_df['Reason'].fillna('-')
+                else: pos_df['Reason'] = '-'
+                
+                if 'Days' in pos_df.columns: pos_df['Days'] = pos_df['Days'].fillna(0).astype(int)
+                else: pos_df['Days'] = 0
                 # Update LTP from Analysis
                 if 'Current' in pos_df.columns:
                     pos_df['LTP'] = pos_df['Current'].combine_first(pos_df.get('LTP', pd.Series([None]*len(pos_df))))
@@ -720,7 +747,7 @@ with tab_portfolio:
             pos_df[show_cols].style.map(color_action, subset=['Action']).format({
                 'Entry': '{:.2f}', 'LTP': '{:.2f}', 'PnL_Pct': '{:.2f}%'
             }),
-            use_container_width=True,
+            width="stretch",
             height=300
         )
         
@@ -767,7 +794,7 @@ with tab_portfolio:
                  st.write("") # Spacing
                  
                  # Close (Archive)
-                 if st.button("✅ Close Trade (P&L)", use_container_width=True):
+                 if st.button("✅ Close Trade (P&L)", width="stretch"):
                      entry = pos_df[pos_df['Symbol']==m_sym]['Entry'].iloc[0]
                      pnl = ((m_price - entry)/entry)*100
                      sheets_db.archive_trade({
@@ -779,7 +806,7 @@ with tab_portfolio:
                      st.success(f"Closed {m_sym}")
                      st.rerun()
 
-                 if st.button("🗑️ Delete (Mistake)", type="primary", use_container_width=True):
+                 if st.button("🗑️ Delete (Mistake)", type="primary", width="stretch"):
                      sheets_db.delete_trade(m_sym)
                      st.warning(f"Deleted {m_sym} (No History)")
                      time.sleep(1)
@@ -906,7 +933,7 @@ with tab_radar:
         st.dataframe(
             df_res.style.map(color_tqs, subset=['TQS'])
                         .map(color_weekly, subset=['Weekly %']),
-            use_container_width=True,
+            width="stretch",
             height=500
         )
     except Exception as e:
@@ -916,6 +943,6 @@ with tab_radar:
         # Fallback for older pandas
         st.dataframe(
             df_res.style.applymap(color_tqs, subset=['TQS']),
-            use_container_width=True,
+            width="stretch",
             height=500
         )

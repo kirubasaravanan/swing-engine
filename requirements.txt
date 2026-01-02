@@ -9,3 +9,4 @@ pyotp
 python-dotenv
 logzero
 websocket-client
+pyarrow
