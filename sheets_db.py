@@ -125,7 +125,9 @@ def push_portfolio_to_cloud(portfolio_data):
             rows = [list(x.values()) for x in portfolio_data]
             ws.append_rows(rows)
         return True
-    except: return False
+    except Exception as e:
+        print(f"Cloud Push Failed: {e}")
+        return False
 
 # --- READ METHODS (INSTANT) ---
 
@@ -189,15 +191,22 @@ def delete_trade(symbol):
     db = load_local_db()
     if not db: return
     
+    # Normalize: Remove .NS for matching (assuming DB stores clean)
+    clean_sym = symbol.replace(".NS", "").upper()
+    
     init_len = len(db["portfolio"])
-    # Filter out by symbol
-    db["portfolio"] = [t for t in db["portfolio"] if t["Symbol"] != symbol]
+    # Filter out by clean symbol
+    db["portfolio"] = [t for t in db["portfolio"] if t["Symbol"].replace(".NS", "").upper() != clean_sym]
     
     if len(db["portfolio"]) < init_len:
         save_local_db(db)
-        # 2. Push Cloud (Overwrite = No 'wrong row' errors)
-        push_portfolio_to_cloud(db["portfolio"])
-        print(f"Deleted {symbol} local & cloud.")
+        # 2. Push Cloud
+        try:
+             success = push_portfolio_to_cloud(db["portfolio"])
+             if success: print(f"Deleted {clean_sym} local & cloud.")
+             else: print(f"Deleted {clean_sym} Local ONLY. Cloud Push Failed.")
+        except:
+             print(f"Deleted {clean_sym} Local ONLY. Cloud Push Exception.")
 
 def close_trade_db(symbol, exit_price):
     # This was missing in replacement - needed for exit

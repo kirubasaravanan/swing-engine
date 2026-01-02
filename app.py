@@ -677,8 +677,27 @@ with tab_portfolio:
                 pos_df['Action'] = pos_df['Action'].fillna('HOLD')
                 pos_df['Reason'] = pos_df['Reason'].fillna('-')
                 pos_df['Days'] = pos_df['Days'].fillna(0).astype(int)
-                # Update LTP
-                pos_df['LTP'] = pos_df['Current'].combine_first(pos_df['LTP'])
+                # Update LTP from Analysis
+                if 'Current' in pos_df.columns:
+                    pos_df['LTP'] = pos_df['Current'].combine_first(pos_df.get('LTP', pd.Series([None]*len(pos_df))))
+        
+        # FALLBACK: If LTP is still missing (Merge failed or Analysis empty), look in Cache directly
+        if 'engine' in st.session_state and hasattr(st.session_state['engine'], 'data_map'):
+             d_map = st.session_state['engine'].data_map.get('1d', {})
+             
+             def get_cached_price(row):
+                 if pd.notnull(row.get('LTP')) and row['LTP'] > 0: return row['LTP']
+                 # Try finding price in cache
+                 sym = row['Symbol']
+                 # Try clean and .NS
+                 ticks = [sym, sym + ".NS", sym.replace(".NS","")]
+                 for t in ticks:
+                     df = d_map.get(t)
+                     if df is not None and not df.empty:
+                         return df['Close'].iloc[-1]
+                 return row['Entry'] # Ultimate fallback
+             
+             pos_df['LTP'] = pos_df.apply(get_cached_price, axis=1)
 
         # 2. DISPLAY TABLE
         # Columns: Symbol | Entry | LTP | PnL% | Days | Action | Reason
