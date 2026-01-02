@@ -39,8 +39,26 @@ SCAN_INTERVAL = 900 # 15 Minutes
 CACHE_DIR = "cache" 
 if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
 
+# Helper for auto-refresh
+try:
+    from streamlit_autorefresh import st_autorefresh
+except:
+    def st_autorefresh(interval, key): pass # Mock if missing
+
 # --- CACHE CONTROL (Force Reload Logic) ---
 ENGINE_VERSION = 1.6 # Increment to 1.6 to force reload
+
+# --- ENGINE STATUS (Global Load) ---
+import json
+status_file = os.path.join(CACHE_DIR, "engine_status.json")
+eng_status = {"state": "UNKNOWN", "last_updated": "Never"}
+
+if os.path.exists(status_file):
+    try:
+        with open(status_file, "r") as f:
+            eng_status = json.load(f)
+    except: pass
+
 if 'engine_version' not in st.session_state or st.session_state['engine_version'] != ENGINE_VERSION:
     print(f"🔄 Detected New Engine Version ({ENGINE_VERSION}). Reloading Module...")
     if 'engine' in st.session_state: del st.session_state['engine']
@@ -152,7 +170,15 @@ if 'angel_client' not in st.session_state:
     conn = init_connection()
     if conn:
         st.session_state['angel_client'] = conn.manager if hasattr(conn, 'manager') else conn
-        st.session_state['angel_mgr'] = conn # For Sidebar check
+        
+        # Initialize Data Manager (Wrapper)
+        try:
+            from angel_data import AngelDataManager
+            # This triggers the Reuse Session logic in AngelDataManager
+            st.session_state['angel_mgr'] = AngelDataManager()
+        except Exception as e:
+            print(f"Data Manager Init Failed: {e}")
+            st.session_state['angel_mgr'] = conn
         st.session_state['angel_api_status'] = True
     else:
         st.session_state['angel_api_status'] = False
@@ -333,7 +359,7 @@ with st.sidebar:
 
                 
 
-    # --- SCANNING LOGIC (Time-Gated) ---
+    # --- SCANNING LOGIC (Background Job) ---
     
     can_scan = True
     time_left = 0
@@ -347,41 +373,28 @@ with st.sidebar:
     # Force Scan Checkbox
     force_scan = st.checkbox("Force Scan (Ignore Timer)", value=False)
     
-    # Determine Logic State
-    is_scan_ready = can_scan or force_scan
+    # Check if ALREADY RUNNING
+    if eng_status.get("state") == "RUNNING":
+        can_scan = False
+        btn_label = "Running Background Scan... ⏳"
+    else:
+        is_scan_ready = can_scan or force_scan
+        btn_label = "RUN BACKGROUND SCAN 🚀" if is_scan_ready else f"Wait {time_left//60}m {time_left%60}s ⏳"
     
-    btn_label = "RUN SCAN 🚀" if is_scan_ready else f"Wait {time_left//60}m {time_left%60}s ⏳"
-    
-    if st.button(btn_label, type="primary", disabled=not is_scan_ready):
-        st_time = time.time() # Phase 8: Timer
+    if st.button(btn_label, type="primary", disabled=not (can_scan or force_scan) or eng_status.get("state") == "RUNNING"):
+        import subprocess
+        import sys
+        
         st.session_state['last_scan_time'] = time.time()
-        with st.status("🚀 Initializing Scan Sequence...", expanded=True) as status:
-            
-            st.write("📡 Connecting to Market Data Feed (Parquet Cache)...")
-            # Simulate slight delay to show progress (optional, but feels responsive)
-            time.sleep(0.5)
-            
-            st.write("🧠 Decisions Engine: Analyzing Volatility & Trends...")
-            
-            # Progress Bar
-            prog_bar = st.progress(0)
-            def update_prog(p):
-                prog_bar.progress(p)
-                
-            results = st.session_state['engine'].scan(progress_callback=update_prog)
-            
-            st.write(f"🔍 Found {len(results)} potential setups.")
-            
-            st.write("💾 Saving Intelligence to Cloud Database...")
-            sheets_db.save_scan_results(results)
-            st.session_state['scan_results'] = results
-            
-            status.update(label="✅ Scan Complete!", state="complete", expanded=False)
-            
-        elapsed = time.time() - st_time
-        st.toast(f"⏱️ Scan Completed in {elapsed:.2f}s")
-        time.sleep(1)
-        st.rerun()
+        
+        # Launch Background Job
+        try:
+            subprocess.Popen([sys.executable, "run_engine_job.py", "--mode", "full"])
+            st.toast("🚀 Background Scan Started! Check banner above.")
+            time.sleep(1)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to start job: {e}")
 
 
 # --- AUTHENTICATION ---
@@ -444,6 +457,20 @@ except Exception as e:
     st.stop()
     
 st.title("Swing Decision Radar 📡")
+
+# --- ENGINE STATUS BANNER ---
+# Status already loaded globally at top
+if eng_status.get("state") == "RUNNING":
+    prog = eng_status.get("progress", "0%")
+    mode = eng_status.get("mode", "full")
+    st.warning(f"⚠️ Market Data Updating ({prog})... [Mode: {mode}] \n\n Showing last completed snapshot.")
+    st_autorefresh(interval=30000, key="data_refresh") # Auto-refresh every 30s
+elif eng_status.get("state") == "COMPLETED":
+    last = eng_status.get("last_updated", "Unknown")
+    st.success(f"🟢 Data Current (Updated: {last})")
+
+
+
 
 # TABS
 # TABS
@@ -514,7 +541,7 @@ with tab_watchlist:
 
         st.dataframe(
             df_display, 
-            use_container_width=True,
+            width="stretch",
             column_config={
                 "status": st.column_config.TextColumn("Status", help="Active/Inactive"),
                 "max_tqs": st.column_config.NumberColumn("Max TQS", format="%.0f"),
@@ -551,7 +578,7 @@ with tab_history:
             m1.metric("Total Realized P&L", f"{total_pnl:.2f}%")
             m2.metric("Win Rate", f"{win_rate:.0f}%")
             
-            st.dataframe(df_hist, use_container_width=True)
+            st.dataframe(df_hist, width="stretch")
     else:
         st.info("No closed trades yet.")
 with tab_portfolio:
@@ -620,26 +647,37 @@ with tab_portfolio:
         pos_df = pd.DataFrame(pos_data)
         
         # 1. AUTO-ANALYZE & MERGE
-        with st.spinner("Analyzing Positions..."):
-            try:
-                # Run Engine Check
-                analysis = st.session_state['engine'].check_exits(pos_df)
-                if analysis:
-                    an_df = pd.DataFrame(analysis)
-                    if 'Symbol' in an_df.columns:
-                        an_df = an_df.drop_duplicates(subset=['Symbol'])
-                        # Merge actionable data
-                        pos_df = pd.merge(pos_df, an_df[['Symbol', 'Action', 'Reason', 'Days', 'Current']], on='Symbol', how='left')
-                        
-                        # Fill NaNs
-                        pos_df['Action'] = pos_df['Action'].fillna('HOLD')
-                        pos_df['Reason'] = pos_df['Reason'].fillna('-')
-                        pos_df['Days'] = pos_df['Days'].fillna(0).astype(int)
-                        # Update LTP
-                        pos_df['LTP'] = pos_df['Current'].combine_first(pos_df['LTP'])
-            except Exception as e:
-                # Non-critical, just show raw DB data
-                pass
+        # Use Pre-Calculated JSON from Background Job if available (Fast)
+        pf_json_path = os.path.join(CACHE_DIR, "ui_portfolio_analysis.json")
+        analysis = []
+        
+        if os.path.exists(pf_json_path):
+             try:
+                 with open(pf_json_path, "r") as f:
+                     analysis = json.load(f)
+             except: pass
+        
+        # Fallback to On-Demand (Slow) if JSON missing
+        if not analysis:
+             with st.spinner("Analyzing Positions (Fallback)..."):
+                try:
+                    # Run Engine Check
+                    analysis = st.session_state['engine'].check_exits(pos_df)
+                except: pass
+                
+        if analysis:
+            an_df = pd.DataFrame(analysis)
+            if 'Symbol' in an_df.columns:
+                an_df = an_df.drop_duplicates(subset=['Symbol'])
+                # Merge actionable data
+                pos_df = pd.merge(pos_df, an_df[['Symbol', 'Action', 'Reason', 'Days', 'Current']], on='Symbol', how='left')
+                
+                # Fill NaNs
+                pos_df['Action'] = pos_df['Action'].fillna('HOLD')
+                pos_df['Reason'] = pos_df['Reason'].fillna('-')
+                pos_df['Days'] = pos_df['Days'].fillna(0).astype(int)
+                # Update LTP
+                pos_df['LTP'] = pos_df['Current'].combine_first(pos_df['LTP'])
 
         # 2. DISPLAY TABLE
         # Columns: Symbol | Entry | LTP | PnL% | Days | Action | Reason
@@ -777,41 +815,40 @@ with tab_radar:
                     chg_color = "#00E676" if chg >= 0 else "#FF5252"
                     
                     # Target/Stop (Calculated 2R for display)
+                    # Target (Calculated 2R for display)
                     risk = max(price - item['Stop'], price*0.01)
-            target = price + (2 * risk)
-            
-            # Font: Source Sans Pro (Injected in CSS)
-            
-            # Card HTML - No Indentation Issue
-            card_html = f"""
-<div style="background-color: #161B22; border: 1px solid #30363D; border-radius: 6px; padding: 12px; margin-bottom: 12px; color: #C9D1D9; font-family: 'Source Sans Pro', sans-serif;">
-    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 6px;">
-        <div style="font-size: 16px; font-weight: 700; color: #FFFFFF; letter-spacing: 0.5px;">{item['Symbol']}</div>
-        <div style="font-size: 12px; color: #8B949E; text-align: right;">
-            <span style="color: {p_color}; font-weight: 600;">TQS {item['TQS']}</span>
-        </div>
-    </div>
-    <div style="margin-bottom: 6px;">
-        <span style="font-size: 20px; font-weight: 600; color: #FFFFFF;">₹{price:.1f}</span>
-        <span style="font-size: 13px; color: {chg_color}; font-weight: 600; margin-left: 4px;">({chg_str})</span>
-        <span style="font-size: 11px; color: #AAAAAA; margin-left: 8px;">1W: <span style="color: #00E676;">{item.get('Weekly %', 0):.1f}%</span></span>
-    </div>
-    <div style="font-size: 11px; color: #8B949E; margin-bottom: 10px;">
-        RSI: <span style="color: #E6EDF3;">{item['RSI']:.1f}</span> <span style="color: #484F58;">|</span> 
-        CHOP: <span style="color: #E6EDF3;">{item.get('CHOP', 0):.1f}</span>
-    </div>
-    <div style="margin-bottom: 10px;">
-        <span style="background-color: #1F6FEB20; color: #58A6FF; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase;">
-            {item['Type'].replace("🚀", "").strip()}
-        </span>
-    </div>
-    <div style="border-top: 1px solid #21262D; padding-top: 8px; font-size: 10px; color: #8B949E; display: flex; justify-content: space-between;">
-        <span>Stop: {item['Stop']:.2f}</span>
-        <span>Target: {price + (2 * risk):.1f}</span>
-    </div>
-</div>
-"""
-            st.markdown(card_html, unsafe_allow_html=True)
+                    target = price + (2 * risk)
+                    
+                    # Card HTML
+                    card_html = f"""
+                    <div style="background-color: #161B22; border: 1px solid #30363D; border-radius: 6px; padding: 12px; margin-bottom: 12px; color: #C9D1D9; font-family: 'Source Sans Pro', sans-serif;">
+                        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 6px;">
+                            <div style="font-size: 16px; font-weight: 700; color: #FFFFFF; letter-spacing: 0.5px;">{item['Symbol']}</div>
+                            <div style="font-size: 12px; color: #8B949E; text-align: right;">
+                                <span style="color: {p_color}; font-weight: 600;">TQS {item['TQS']}</span>
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 6px;">
+                            <span style="font-size: 20px; font-weight: 600; color: #FFFFFF;">₹{price:.1f}</span>
+                            <span style="font-size: 13px; color: {chg_color}; font-weight: 600; margin-left: 4px;">({chg_str})</span>
+                            <span style="font-size: 11px; color: #AAAAAA; margin-left: 8px;">1W: <span style="color: #00E676;">{item.get('Weekly %', 0):.1f}%</span></span>
+                        </div>
+                        <div style="font-size: 11px; color: #8B949E; margin-bottom: 10px;">
+                            RSI: <span style="color: #E6EDF3;">{item['RSI']:.1f}</span> <span style="color: #484F58;">|</span> 
+                            CHOP: <span style="color: #E6EDF3;">{item.get('CHOP', 0):.1f}</span>
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <span style="background-color: #1F6FEB20; color: #58A6FF; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase;">
+                                {item['Type'].replace("🚀", "").strip()}
+                            </span>
+                        </div>
+                        <div style="border-top: 1px solid #21262D; padding-top: 8px; font-size: 10px; color: #8B949E; display: flex; justify-content: space-between;">
+                            <span>Stop: {item['Stop']:.2f}</span>
+                            <span>Target: {target:.1f}</span>
+                        </div>
+                    </div>
+                    """
+                    st.markdown(card_html, unsafe_allow_html=True)
 
     # --- LIST VIEW ---
     st.markdown("### 📋 Full Scan Results")

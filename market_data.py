@@ -7,7 +7,7 @@ except ImportError:
     st = None
 
 # --- CONFIG ---
-CACHE_DIR = "cache"
+CACHE_DIR = os.path.join("cache", "raw")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 def get_cache_path(symbol, interval):
@@ -155,10 +155,24 @@ def get_bulk_snapshot(symbols):
             from angel_data import AngelDataManager
             mgr = AngelDataManager()
             
-        return mgr.fetch_market_data_batch(symbols, mode="FULL")
+        # Chunking to prevent API Overload / Timeout
+        all_dfs = []
+        chunk_size = 50
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i:i + chunk_size]
+            try:
+                df = mgr.fetch_market_data_batch(chunk, mode="FULL")
+                if not df.empty:
+                    all_dfs.append(df)
+            except Exception as ex:
+                print(f"Batch Chunk Failed: {ex}")
+                
+        if all_dfs:
+            return pd.concat(all_dfs)
+        return pd.DataFrame()
         
     except Exception as e:
-        print(f"Bulk Snapshot Error: {e}")
+        print(f"Bulk Snapshot Wrapper Error: {e}")
         return pd.DataFrame()
 
 def clear_cache():

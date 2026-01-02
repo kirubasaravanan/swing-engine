@@ -188,14 +188,8 @@ class AngelDataManager:
             
             try:
                 # Mode "FULL" gives LTP, Open, High, Low, Close, Volume, LastTradeQty, etc.
-                params = {
-                    "mode": mode,
-                    "exchangeTokens": {
-                        "NSE": batch
-                    }
-                }
-                
-                res = self.manager.smart_api.getMarketData(params)
+                # FIX: SmartConnect.getMarketData takes (mode, exchangeTokens) as positional args, not a dict
+                res = self.manager.smart_api.getMarketData(mode, exchangeTokens=batch)
                 
                 if res['status'] and res['data']:
                     all_results.extend(res['data']) # List of dicts

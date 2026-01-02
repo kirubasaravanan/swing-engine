@@ -8,6 +8,10 @@ from engine_v2 import SwingEngine
 import bulk_deals
 import sheets_db
 import logging
+import socket
+
+# Global Timeout (Prevents indefinite hangs in Cloud)
+socket.setdefaulttimeout(15.0)
 
 # --- CONFIG ---
 MAX_TRADES = 3
@@ -97,6 +101,10 @@ def run_cycle(scheduled_time):
     # --- 3. EXITS & ENTRIES (Trading Slots Only) ---
     if run_type in ["OPENING", "TRADING"]:
         # A. EXITS
+        # Load Snapshot (Fast Mode)
+        data_map = engine.load_snapshot()
+        
+        # A. EXITS
         logger.info("   > Checking Exits...")
         try:
             trades_df = pd.DataFrame([t for t in sheets_db.fetch_portfolio() if t.get('Status')=='OPEN'])
@@ -104,7 +112,8 @@ def run_cycle(scheduled_time):
 
         if not trades_df.empty:
              trades_df['Entry'] = pd.to_numeric(trades_df['Entry'], errors='coerce')
-             exits = engine.check_exits(trades_df)
+             # Pass cached data to check_exits
+             exits = engine.check_exits(trades_df, data_map=data_map)
              for ex in exits:
                  if "EXIT" in ex['Action'] or "BOOK" in ex['Action']:
                      logger.info(f"   🚨 SELL: {ex['Symbol']}")
@@ -121,7 +130,8 @@ def run_cycle(scheduled_time):
         logger.info(f"   > Buckets: {current_count}/{MAX_TRADES}")
         
         if open_slots > 0:
-            results = engine.scan()
+            # Pass cached data to scan
+            results = engine.scan(data_map=data_map)
             high_qual = [x for x in results if x['TQS'] >= 8]
             high_qual.sort(key=lambda x: (-x['TQS'], x['Price']))
             

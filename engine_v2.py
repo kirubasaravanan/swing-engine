@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import time
+import os
 
 # --- CONSTANTS ---
 DEFAULT_TICKERS = [
@@ -28,6 +29,54 @@ class SwingEngine:
     def set_universe(self, tickers):
         if tickers:
             self.universe = [t if ".NS" in t else f"{t}.NS" for t in tickers]
+
+    def load_snapshot(self):
+        """
+        Loads the monolithic UI cache files into a data_map.
+        Returns: data_map {'1d': df, '1h': df, ...} or None
+        """
+        try:
+            import os
+            # Paths
+            cache_dir = "cache"
+            p_1d = os.path.join(cache_dir, "ui_1d.parquet")
+            p_1h = os.path.join(cache_dir, "ui_1h.parquet")
+            p_15m = os.path.join(cache_dir, "ui_15m.parquet")
+            
+            data_map = {}
+            
+            if os.path.exists(p_1d): 
+                df = pd.read_parquet(p_1d)
+                # Standardize Index
+                if 'Symbol' in df.columns:
+                     # If Symbol is a column, we can group directly
+                     data_map['1d'] = {symbol: data.set_index('Date') if 'Date' in data.columns else data 
+                                       for symbol, data in df.groupby('Symbol')}
+                # If MultiIndex (Symbol, Date)
+                elif isinstance(df.index, pd.MultiIndex):
+                     data_map['1d'] = {symbol: data.droplevel(0) for symbol, data in df.groupby(level=0)}
+
+            if os.path.exists(p_1h): 
+                df = pd.read_parquet(p_1h)
+                if 'Symbol' in df.columns:
+                    # Assuming Datetime column exists
+                    data_map['1h'] = {symbol: data.set_index('Datetime') if 'Datetime' in data.columns else data 
+                                      for symbol, data in df.groupby('Symbol')}
+                elif isinstance(df.index, pd.MultiIndex):
+                    data_map['1h'] = {symbol: data.droplevel(0) for symbol, data in df.groupby(level=0)}
+
+            if os.path.exists(p_15m): 
+                df = pd.read_parquet(p_15m)
+                if 'Symbol' in df.columns:
+                    data_map['15m'] = {symbol: data.set_index('Datetime') if 'Datetime' in data.columns else data 
+                                       for symbol, data in df.groupby('Symbol')}
+                elif isinstance(df.index, pd.MultiIndex):
+                     data_map['15m'] = {symbol: data.droplevel(0) for symbol, data in df.groupby(level=0)}
+                
+            return data_map
+        except Exception as e:
+            print(f"Snapshot Load Error: {e}")
+            return None
 
     # [Deleted duplicate fetch_data method]
 
@@ -280,167 +329,83 @@ class SwingEngine:
             print(f"Deep Dive Error: {e}")
             return None
 
-    def check_exits(self, positions_df):
+    def check_exits(self, positions_df, data_map=None):
         """
         Check existing positions for Exit Signals.
         positions_df: DataFrame with ['Symbol', 'Entry']
+        data_map: Optional injection of market data.
         """
         # Optimize: Only fetch data for portfolio stocks
         unique_tickers = []
         if 'Symbol' in positions_df.columns:
             raw_syms = positions_df['Symbol'].unique()
-            # Ensure proper format (append .NS if missing, or handle both?)
-            # The fetcher expects .NS usually for Yahoo
             unique_tickers = [s + ".NS" if ".NS" not in s else s for s in raw_syms]
 
-        # Fetch Limited Data (Instant Sequential Fetch)
-        data_map = self.fetch_data(limit_to_tickers=unique_tickers)
+        # Fetch Limited Data if missing
+        if data_map is None:
+            data_map = self.fetch_data(limit_to_tickers=unique_tickers)
         if not data_map: return []
         
-        # Use 1H data for Exits (Dynamic) or 1D for Trend?
-        # Let's use 1H for granular exits (RSI > 75 etc)
-        raw_data = data_map.get('1h')
-        if not raw_data: return []
+        # FIX: data_map is now Dict of DFs, not Monolithic DF
+        d_1h = data_map.get('1h', {})
+        if not d_1h: return []
         
         exits = []
         
-        # Simpler fetch for portfolio (fetch only what we own if universe is huge?)
-        # For now, assuming portfolio is subset of scanned universe or just re-using raw_data
-        
-        # We need a robust "Get Ticker" helper from raw_data like in scan()
-        # reusing logic...
-        
-        # Quick helper to extract single DF from batch
-        def get_df_tick(data, tick):
-            # Same extraction logic as scan...
-            # simplified for brevity assuming standard batch
-            try:
-                if isinstance(data.columns, pd.MultiIndex):
-                    # Try both levels just in case
-                    try: return data.xs(tick, axis=1, level=0).copy()
-                    except: return data.xs(tick, axis=1, level=1).copy()
-                else:
-                    return data.copy()
-            except: return None
-
-        for idx, row in positions_df.iterrows():
-            raw_sym = row['Symbol']
-            # Ensure .NS consistency
-            sym = raw_sym + ".NS" if ".NS" not in raw_sym else raw_sym
-            clean_sym = raw_sym.replace(".NS", "")
+        for i, row in positions_df.iterrows():
+            sym = row.get('Symbol')
+            if not sym: continue
             
-            entry = float(row['Entry'])
+            # Append .NS if missing
+            tick = sym if ".NS" in sym else sym + ".NS"
             
-            # Try finding in batch data using both formats
-            df_tick = None
-            if raw_data is not None:
-                # Try Keys: "RELIANCE.NS", "RELIANCE", "REL..."
-                if sym in raw_data: df_tick = raw_data[sym]
-                elif clean_sym in raw_data: df_tick = raw_data[clean_sym]
-                # If raw_data is MultiIndex DataFrame (from batch download)
-                elif isinstance(raw_data.columns, pd.MultiIndex):
-                     try: df_tick = raw_data.xs(sym, axis=1, level=0)
-                     except: 
-                        try: df_tick = raw_data.xs(clean_sym, axis=1, level=0)
-                        except: pass
+            # Direct Dict Lookup (Fast)
+            df_1h = d_1h.get(tick)
             
-            # Fallback: Force Download (Angel One)
-            if df_tick is None or df_tick.empty:
-                 try: 
-                     if 'angel_mgr' in st.session_state:
-                         mgr = st.session_state.angel_mgr
-                         # Fetch 5 days history for fallback
-                         df_tick = mgr.fetch_hist_data(sym, interval="ONE_HOUR", days=5)
+            if df_1h is None or df_1h.empty:
+                # Fallback: Try cleaning ticker
+                df_1h = d_1h.get(tick.replace(".NS", ""))
+            
+            if df_1h is None or df_1h.empty:
+                 continue
+                 
+            # Ensure indicators
+            if 'RSI' not in df_1h.columns:
+                 try:
+                     df_1h = self.calculate_indicators(df_1h)
                  except: continue
+            # 4. STRUCTURE (2 pts): 1H CHOP < 50
+            chop = df_1h['CHOP'].iloc[-1] if 'CHOP' in df_1h.columns else 50
             
-            if df_tick is None or df_tick.empty: continue
+            # Simple Exit Logic for now: RSI > 75 or Reverse TQS > 8
+            rsi = df_1h.get('RSI', 50)
+            if isinstance(rsi, pd.Series): rsi = rsi.iloc[-1]
             
-            # DEBUG: Trace Data Source
+            rev_tqs = 0
             try:
-                # Get scalar close properly to avoid ambiguity
-                last_price = df_tick['Close'].iloc[-1]
-                if isinstance(last_price, pd.Series): last_price = last_price.iloc[0]
-                print(f"Set: {sym} | Source: {'Cache' if sym in raw_data else 'Download'} | Price: {float(last_price)}")
-            except Exception as e: print(f"Debug Err: {e}")
-
-            # FLATTEN COLUMNS (Critical Fix)
-            # yfinance returns MultiIndex (Price, Ticker) or (Ticker, Price)
-            if isinstance(df_tick.columns, pd.MultiIndex):
-                # If we can extract by symbol (if symbol is in columns)
-                # Check if symbol is in the levels
-                found = False
-                for level in range(df_tick.columns.nlevels):
-                    if sym in df_tick.columns.get_level_values(level):
-                        df_tick = df_tick.xs(sym, axis=1, level=level)
-                        found = True
-                        break
-                
-                # If not found (maybe just Price levels), just drop levels to get names
-                if not found:
-                    df_tick.columns = df_tick.columns.get_level_values(0)
-            
-            # Ensure we have clean string columns
-            df_tick.columns = [str(c) for c in df_tick.columns]
-
-            if 'Close' not in df_tick.columns: continue
-            
-            # Indicators
-            df_calc = self.calculate_indicators(df_tick)
-            if df_calc is None: continue
-            curr = df_calc.iloc[-1]
-            
-            # EXIT LOGIC
-            action = "HOLD"
-            reason = ""
-            
-            curr_price = curr['Close']
-            pnl_pct = ((curr_price - entry) / entry) * 100
-            
-            # Days Held
-            days_held = 0
-            try:
-                entry_date = pd.to_datetime(row['Date'])
-                today = pd.Timestamp.now()
-                days_held = (today - entry_date).days
+                if 'Close' in df_1h.columns:
+                     rev_tqs = self.calculate_reverse_tqs(df_1h.iloc[-1], df_1h) 
             except: pass
             
-            # 1. Profit Target (Momentum Fade)
-            if curr['RSI'] > 75:
-                action = "BOOK PROFIT"
-                reason = "RSI Overheated (>75)"
-            elif pnl_pct > 15:
-                action = "BOOK PARTIAL"
-                reason = "Target Hit (>15%)"
-                
-            # 2. Trailing Stop (Momentum Loss)
-            elif curr_price < curr['EMA_9']:
-                action = "TRAIL EXIT"
-                reason = "Lost Momentum (< EMA9)"
-                
-            # 3. Hard Stop (Trend Loss)
-            elif curr_price < curr['EMA_20']:
-                action = "HARD EXIT"
-                reason = "Trend Broken (< EMA20)"
-                
-            # 4. Weakness (Reverse TQS)
-            # We can calculate RevTQS here too if we passed daily data
-            # For now keeping it simple based on EMA/RSI
-                
-            exits.append({
-                'Symbol': row['Symbol'],
-                'Current': round(curr_price, 2),
-                'PnL %': round(pnl_pct, 1),
-                'Action': action,
-                'Reason': reason,
-                'Days': days_held,
-                'RSI': round(curr['RSI'], 1),
-                'EMA9': round(curr['EMA_9'], 1)
-            })
+            signal = "HOLD"
+            reason = ""
             
-            # DISCORD ALERT
-            if self.discord and action != "HOLD":
-                 self.discord.notify_exit_signal(row['Symbol'], reason, round(curr_price, 2))
-            
+            if rsi > 75:
+                signal = "EXIT WARNING"
+                reason = f"Overbought RSI ({round(rsi,1)})"
+            elif rev_tqs >= 7:
+                 signal = "EXIT SIGNAL"
+                 reason = f"Bearish Reversal (Score {rev_tqs})"
+                 
+            if signal != "HOLD":
+                exits.append({
+                    'Symbol': sym,
+                    'Signal': signal,
+                    'Reason': reason,
+                    'Price': df_1h['Close'].iloc[-1],
+                    'Time': str(df_1h.index[-1])
+                })
+                
         return exits
 
     def calculate_reverse_tqs(self, row, df_daily):
@@ -488,89 +453,57 @@ class SwingEngine:
         if not self.universe and not limit_to_tickers: return {}
         
         import market_data
+        import os
+        try:
+             import streamlit as st
+        except: st = None
         
         # Determine scope
         tickers = limit_to_tickers if limit_to_tickers else self.universe
-        # Ensure unique and formatted (roughly) if needed
         tickers = list(set(tickers))
-        
-        # Ensure unique and formatted (roughly) if needed
-        tickers = list(set(tickers))
-        
         
         results = {'1d': {}, '1h': {}, '15m': {}}
         
         def fetch_ticker_tfs(ticker):
-            # Fetch all 3 timeframes for one ticker
-            try:
-                # 1D: Need large history for trend/weekly (3mo is safe default for fetch, cache handles it)
-                d1 = market_data.incremental_fetch(ticker, "1d", "1y") # 1y for robust daily
-                
-                # 1H: Need 1mo for Chop/RSI
-                h1 = market_data.incremental_fetch(ticker, "1h", "1mo")
-                
-                # 15M: Need 5d for Entry
-                m15 = market_data.incremental_fetch(ticker, "15m", "5d")
-                
-                return ticker, d1, h1, m15
-            except:
-                return ticker, None, None, None
+             try:
+                 d1 = market_data.incremental_fetch(ticker, "1d", "1y")
+                 h1 = market_data.incremental_fetch(ticker, "1h", "1mo")
+                 m15 = market_data.incremental_fetch(ticker, "15m", "5d")
+                 return ticker, d1, h1, m15
+             except:
+                 return ticker, None, None, None
 
         # PARALLEL EXECUTION STRATEGY
-        # Cloud/CI usually has limited CPU or gets rate-limited by Angel One.
-        # Local can handle parallelism better.
-        
         is_cloud = os.getenv("CI") or os.getenv("GITHUB_ACTIONS") or (
-            hasattr(st, "secrets") and "ANGEL_API_KEY" in st.secrets
+            st is not None and hasattr(st, "secrets") and "ANGEL_API_KEY" in st.secrets
         )
 
         if is_cloud:
-             # SEQUENTIAL (Safe Mode) - 1 Request at a time
-             print("[INFO] Cloud Environment Detected. Using Sequential Access to avoid 429/Timeout.")
-             results_map = results
-             completed_count = 0
-             
-             import time
+             # SEQUENTIAL
              for tic in tickers:
                   tic, d1, h1, m15 = fetch_ticker_tfs(tic)
-                  if d1 is not None and not d1.empty: results_map['1d'][tic] = d1
-                  if h1 is not None and not h1.empty: results_map['1h'][tic] = h1
-                  if m15 is not None and not m15.empty: results_map['15m'][tic] = m15
-                  
-                  completed_count += 1
-                  if progress_callback and completed_count % 5 == 0:
-                      try: progress_callback(0.10 + (0.90 * completed_count / len(tickers)))
-                      except: pass
-                  
-                  # Throttle (Crucial for Cloud)
+                  if d1 is not None and not d1.empty: results['1d'][tic] = d1
+                  if h1 is not None and not h1.empty: results['1h'][tic] = h1
+                  if m15 is not None and not m15.empty: results['15m'][tic] = m15
+                  import time
                   time.sleep(0.5) 
-             
-             print(f"[INFO] Data Loaded (Sequential). 1D: {len(results['1d'])}")
-             return results_map
+             return results
 
         else:
-            # PARALLEL (Local Mode) - 3 Workers
+            # PARALLEL
             max_workers = 3 
-            print(f"[INFO] Fetching Data for {len(tickers)} stocks (Parallel {max_workers} Threads)...")
-            
             from concurrent.futures import ThreadPoolExecutor, as_completed
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(fetch_ticker_tfs, t): t for t in tickers}
-                
-                completed_count = 0
                 for future in as_completed(futures):
                     tic, d1, h1, m15 = future.result()
                     if d1 is not None and not d1.empty: results['1d'][tic] = d1
                     if h1 is not None and not h1.empty: results['1h'][tic] = h1
                     if m15 is not None and not m15.empty: results['15m'][tic] = m15
-                    
-                    completed_count += 1
-                    if completed_count % 50 == 0:
-                        print(f"[INFO] Progress: {completed_count}/{len(tickers)}...")
-                        
-            print(f"[INFO] Data Loaded. 1D: {len(results['1d'])} | 1H: {len(results['1h'])} | 15M: {len(results['15m'])}")
+            
             return results
+
 
     def get_weekly_rankings(self, d_1d_dict):
         """
@@ -703,8 +636,36 @@ class SwingEngine:
         print(f"[INFO] Smart Filter: Reduced {len(self.universe)} -> {len(combined)} Candidates.")
         return combined
 
-    def scan(self, progress_callback=None):
-        """Main Scan Loop (Optimized for Dictionary Data)"""
+    def calculate_tqs_daily_only(self, df_1d):
+        """
+        Calculates a 'Light' TQS based on Daily Data Only.
+        Used for fast bulk scanning. Max Score: 10.
+        """
+        score = 0
+        try:
+            row = df_1d.iloc[-1]
+            
+            # 1. TREND (4 pts): Price > EMA20 (Strong Daily Trend)
+            if row['Close'] > row.get('EMA_20', 999999): score += 4
+            elif row['Close'] > row.get('EMA_50', 999999): score += 2
+            
+            # 2. RSI (3 pts): Bullish Zone
+            rsi = row.get('RSI', 50)
+            if 50 <= rsi <= 70: score += 3
+            elif 40 <= rsi < 50: score += 1
+            
+            # 3. VOLUME (3 pts): High Volume
+            vol = row.get('Volume', 0)
+            if vol > row.get('Vol_SMA', 99999999): score += 3
+            
+        except: return 0
+        return min(score, 10)
+
+    def scan(self, progress_callback=None, data_map=None):
+        """
+        Main Scan Loop.
+        data_map: Optional pre-loaded data {'1d': df, ...} to bypass fetch.
+        """
         if progress_callback: progress_callback(0.05)
         
         # 1. SMART FILTER (Phase 11)
@@ -716,9 +677,15 @@ class SwingEngine:
             print("[WARN] Filtered Universe Empty. Falling back to Top 50 Stocks.")
             target_list = self.universe[:50]
         
-        # 2. Fetch DATA (Targeted)
-        # Pass filtered list to fetch_data to avoid fetching 5000 candles
-        data_map = self.fetch_data(limit_to_tickers=target_list)
+        # 2. Fetch DATA (Targeted) OR Use Provided
+        if data_map is None:
+             # Default: Live Fetch (or local cache individual files)
+             data_map = self.fetch_data(limit_to_tickers=target_list)
+        else:
+             # Use Snapshot (we need to filter it for the target list to optimize loop? 
+             # No, dictionary lookup is fast enough.
+             pass
+             
         if not data_map: return []
         
         d_1d = data_map.get('1d', {})
@@ -740,28 +707,38 @@ class SwingEngine:
             try:
                 # Direct Dict Lookup (O(1))
                 df_day = d_1d.get(ticker)
+                
+                # OPTIMIZATION: Check if we have 1D data first
+                if df_day is None: continue
+                if isinstance(df_day, pd.DataFrame) and df_day.empty: continue
+                if len(df_day) < 20: continue
+                
+                # Check for Granular Data
                 df_60 = d_1h.get(ticker)
                 df_15 = d_15m.get(ticker)
                 
-                if df_day is None or df_60 is None or df_15 is None: continue
-                if len(df_day) < 20: continue
-                
-                # Indicators (Calculated on Single-DF copy - fast)
-                # Note: df is passed by reference, but we assign new columns. 
-                # This modifies the cached DF in Session State (Good! Computed once).
+                # Calculate Daily Indicators (Always needed)
                 if 'EMA_200' not in df_day.columns: df_day = self.calculate_indicators(df_day)
-                if 'EMA_50' not in df_60.columns: df_60 = self.calculate_indicators(df_60)
-                if 'EMA_20' not in df_15.columns: df_15 = self.calculate_indicators(df_15) # 15m needs less but consistent
                 
-                if df_day is None or df_60 is None or df_15 is None: continue
-
                 # Weekly Data
                 clean_ticker = ticker.replace(".NS", "")
                 w_data = weekly_map.get(clean_ticker, {'Rank': 999, 'Percent': 0.0, 'Category': ''})
                 
-                # Score
-                tqs = self.calculate_tqs_multi_tf(df_15, df_60, df_day)
-                rev_tqs = self.calculate_reverse_tqs(df_60.iloc[-1], df_day)
+                rev_tqs = 0
+                
+                # --- HYBRID TQS CALCULATION ---
+                if df_60 is not None and df_15 is not None and not df_60.empty:
+                    # FULL PRECISION TQS (For Portfolio/Watchlist)
+                    if 'EMA_50' not in df_60.columns: df_60 = self.calculate_indicators(df_60)
+                    if 'EMA_20' not in df_15.columns: df_15 = self.calculate_indicators(df_15)
+                    
+                    tqs = self.calculate_tqs_multi_tf(df_15, df_60, df_day)
+                    rev_tqs = self.calculate_reverse_tqs(df_60.iloc[-1], df_day)
+                    tag_suffix = ""
+                else:
+                    # LIGHT TQS (For Bulk Discovery)
+                    tqs = self.calculate_tqs_daily_only(df_day)
+                    tag_suffix = " (1D)"
                 
                 # Tag Logic
                 curr_price = df_day['Close'].iloc[-1]
@@ -781,6 +758,8 @@ class SwingEngine:
                 elif rev_tqs >= 7:
                     tag = "⚠️ SELL SIGNAL"
                     conf = "LOW"
+                    
+                if tag != "WAIT": tag += tag_suffix
 
                 # Safe Extraction Helper
                 def get_val(series, default=0.0):
@@ -794,6 +773,8 @@ class SwingEngine:
                 chop_val = 50.0
                 if 'CHOP' in df_day.columns:
                     chop_val = get_val(df_day['CHOP'], 50.0)
+                    
+                rsi_val = get_val(df_day['RSI']) # Default to Daily RSI if 1H missing
 
                 results.append({
                     'Symbol': str(clean_ticker),
@@ -804,7 +785,7 @@ class SwingEngine:
                     'Weekly %': float(round(w_data['Percent'], 2)),
                     'Type': str(tag),
                     'Confidence': str(conf),
-                    'RSI': float(round(get_val(df_day['RSI']), 1)),
+                    'RSI': float(round(rsi_val, 1)),
                     'CHOP': float(round(chop_val, 1)),
                     'Stop': float(round(get_val(df_day['EMA_20']), 2)), 
                     'Entry': float(round(get_val(df_day['Close']), 2))
