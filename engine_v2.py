@@ -668,22 +668,25 @@ class SwingEngine:
         """
         if progress_callback: progress_callback(0.05)
         
-        # 1. SMART FILTER (Phase 11)
-        target_list = self.get_filtered_universe()
+        target_list = []
         
-        # FALLBACK: If Smart Filter failed (e.g. Angel Batch API down) and Watchlist is empty,
-        # we still want to show SOMETHING.
-        if not target_list:
-            print("[WARN] Filtered Universe Empty. Falling back to Top 50 Stocks.")
-            target_list = self.universe[:50]
+        # 1. SMART FILTER (Phase 11) - ONLY if Live Fetching
+        if data_map is None:
+            target_list = self.get_filtered_universe()
+            
+            # FALLBACK: If Smart Filter failed (e.g. Angel Batch API down) and Watchlist is empty,
+            # we still want to show SOMETHING.
+            if not target_list:
+                print("[WARN] Filtered Universe Empty. Falling back to Top 50 Stocks.")
+                target_list = self.universe[:50]
         
         # 2. Fetch DATA (Targeted) OR Use Provided
         if data_map is None:
              # Default: Live Fetch (or local cache individual files)
              data_map = self.fetch_data(limit_to_tickers=target_list)
         else:
-             # Use Snapshot (we need to filter it for the target list to optimize loop? 
-             # No, dictionary lookup is fast enough.
+             # Use Snapshot - The universe is whatever is in the cache
+             # Optimization: We don't need to filter, we just scan what we have.
              pass
              
         if not data_map: return []

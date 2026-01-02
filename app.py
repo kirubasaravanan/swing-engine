@@ -25,8 +25,9 @@ try:
 except: pass
 
 # Page Config (Must be first ST command)
+# Page Config (Must be first ST command)
 st.set_page_config(
-    page_title="Swing Decision Engine (Local)",
+    page_title="Swing Decision Engine (Cloud v2.0)",
     page_icon="💸",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -46,7 +47,7 @@ except:
     def st_autorefresh(interval, key): pass # Mock if missing
 
 # --- CACHE CONTROL (Force Reload Logic) ---
-ENGINE_VERSION = 1.6 # Increment to 1.6 to force reload
+ENGINE_VERSION = 2.0 # Increment to 2.0 to force reload
 
 # --- ENGINE STATUS (Global Load) ---
 import json
