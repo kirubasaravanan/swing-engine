@@ -188,8 +188,17 @@ class AngelDataManager:
             
             try:
                 # Mode "FULL" gives LTP, Open, High, Low, Close, Volume, LastTradeQty, etc.
-                # FIX: SmartConnect.getMarketData takes (mode, exchangeTokens) where exchangeTokens is {"NSE": [tokens]}
                 res = self.manager.smart_api.getMarketData(mode, exchangeTokens={"NSE": batch})
+                
+                # RETRY LOGIC (Auto-Heal)
+                if not res['status'] and (res['errorcode'] == 'AG8001' or 'Invalid Token' in res['message']):
+                    print("⚠️ Token Expired during Batch Fetch. Re-authenticating...")
+                    success, msg = self.manager.login()
+                    if success:
+                        # Retry
+                        res = self.manager.smart_api.getMarketData(mode, exchangeTokens={"NSE": batch})
+                    else:
+                        print(f"❌ Re-login failed: {msg}")
                 
                 if res['status'] and res['data']:
                     all_results.extend(res['data']) # List of dicts

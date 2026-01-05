@@ -97,6 +97,15 @@ class DiscordBot:
             webhook_url=self.url_bot
         )
 
+    def notify_exit_signal(self, symbol, reason, price):
+        """Urgent Exit Alert -> STOCKS CHANNEL"""
+        self.send_embed(
+            title=f"🚨 EXIT SIGNAL: {symbol}",
+            description=f"Reason: **{reason}**\nExit Price: ₹{price}",
+            color=0xe74c3c, # Red
+            webhook_url=self.url_stocks
+        )
+
     def notify_job_status(self, message, is_error=False):
         """Generic Job Status -> BOT CHANNEL"""
         color = 0xe74c3c if is_error else 0x95a5a6 # Red or Grey
