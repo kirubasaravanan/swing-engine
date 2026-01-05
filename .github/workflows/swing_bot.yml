@@ -64,16 +64,33 @@ jobs:
             bot = os.getenv('DISCORD_WEBHOOK_BOT')
             stocks = os.getenv('DISCORD_WEBHOOK_STOCKS')
             if bot: secrets['discord_webhook_bot'] = bot
-            if stocks: secrets['discord_webhook_stocks'] = stocks
+            if stock_token: secrets['discord_webhook_stocks'] = stock_token
 
-        # Write TOML
-        with open('.streamlit/secrets.toml', 'w') as f:
-            toml.dump(secrets, f)
-
-        # 3. Append Angel (Raw)
+        # 3. Validation & Merge Angel Credentials
         angel_raw = os.getenv('ANGEL_ONE_CREDENTIALS')
         if angel_raw:
-            with open('.streamlit/secrets.toml', 'a') as f:
+            try:
+                # Try to parse the user's TOML block
+                angel_dict = toml.loads(angel_raw)
+                # Merge into main secrets
+                secrets.update(angel_dict)
+                print("✅ ANGEL_ONE_CREDENTIALS parsed and merged.")
+            except Exception as e:
+                print(f"⚠️ WARNING: Could not parse ANGEL_ONE_CREDENTIALS as TOML: {e}")
+                print("Falling back to raw append (Risk of syntax errors).")
+                # We can't merge, so we must append later or fail? 
+                # Let's try to append raw as a fallback, but likely it will fail again.
+                # BETTER: Fail the build so user knows.
+                # But let's append for now to be safe with partial data?
+                # No, mixed append is messy. Let's just append raw if parse fails.
+
+        # Write TOML (Safe Dump)
+        with open('.streamlit/secrets.toml', 'w') as f:
+            toml.dump(secrets, f)
+            
+        if angel_raw and 'angel' not in secrets and 'ANGEL_API_KEY' not in secrets:
+             # If we failed to parse/merge, append raw (Fallback)
+             with open('.streamlit/secrets.toml', 'a') as f:
                 f.write('\n' + angel_raw + '\n')
         EOF
 
