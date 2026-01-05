@@ -38,34 +38,47 @@ jobs:
     - name: Run Bot (One-Shot Cloud Mode)
       env:
         GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        DISCORD_WEBHOOKS: ${{ secrets.DISCORD_WEBHOOKS }}
+        DISCORD_WEBHOOK_BOT: ${{ secrets.DISCORD_WEBHOOK_BOT }}
+        DISCORD_WEBHOOK_STOCKS: ${{ secrets.DISCORD_WEBHOOK_STOCKS }}
+        ANGEL_ONE_CREDENTIALS: ${{ secrets.ANGEL_ONE_CREDENTIALS }}
       run: |
-        # Create .streamlit directory
+
         mkdir -p .streamlit
+        pip install toml
 
-        # --- 1. ADMIN PASSWORD ---
-        echo "[passwords]" > .streamlit/secrets.toml
-        echo "admin = \"swing123\"" >> .streamlit/secrets.toml # Default logic fallback
-        
-        # --- 2. DISCORD WEBHOOKS ---
-        # User defined "DISCORD_WEBHOOKS" (Plural). We try to use it for both channels.
-        GENERIC_HOOK="${{ secrets.DISCORD_WEBHOOKS }}"
-        
-        if [ -n "$GENERIC_HOOK" ]; then
-           echo "discord_webhook_bot = \"$GENERIC_HOOK\"" >> .streamlit/secrets.toml
-           echo "discord_webhook_stocks = \"$GENERIC_HOOK\"" >> .streamlit/secrets.toml
-        else
-           # Fallback if specific keys exist
-           echo "discord_webhook_bot = \"${{ secrets.DISCORD_WEBHOOK_BOT }}\"" >> .streamlit/secrets.toml
-           echo "discord_webhook_stocks = \"${{ secrets.DISCORD_WEBHOOK_STOCKS }}\"" >> .streamlit/secrets.toml
-        fi
-        
-        # --- 3. ANGEL ONE CREDENTIALS ---
-        # If user added the TOML block in ANGEL_ONE_CREDENTIALS, we append it.
-        ANGEL_SECRETS="${{ secrets.ANGEL_ONE_CREDENTIALS }}"
-        if [ -n "$ANGEL_SECRETS" ]; then
-            echo "" >> .streamlit/secrets.toml
-            echo "$ANGEL_SECRETS" >> .streamlit/secrets.toml
-        fi
+        # Generate Secrets Script
+        cat <<EOF > generate_secrets.py
+        import os
+        import toml
 
+        # 1. Passwords
+        secrets = {'passwords': {'admin': 'swing123'}}
+
+        # 2. Discord
+        generic = os.getenv('DISCORD_WEBHOOKS')
+        if generic:
+            secrets['discord_webhook_bot'] = generic
+            secrets['discord_webhook_stocks'] = generic
+        else:
+            bot = os.getenv('DISCORD_WEBHOOK_BOT')
+            stocks = os.getenv('DISCORD_WEBHOOK_STOCKS')
+            if bot: secrets['discord_webhook_bot'] = bot
+            if stocks: secrets['discord_webhook_stocks'] = stocks
+
+        # Write TOML
+        with open('.streamlit/secrets.toml', 'w') as f:
+            toml.dump(secrets, f)
+
+        # 3. Append Angel (Raw)
+        angel_raw = os.getenv('ANGEL_ONE_CREDENTIALS')
+        if angel_raw:
+            with open('.streamlit/secrets.toml', 'a') as f:
+                f.write('\n' + angel_raw + '\n')
+        EOF
+
+        # Run Generator
+        python generate_secrets.py
+        
         # Run Bot
         python swing_bot.py
