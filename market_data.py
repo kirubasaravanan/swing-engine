@@ -107,6 +107,15 @@ def incremental_fetch(symbol, interval="1d", period="1y"):
         if interval == "1h": angel_interval = "ONE_HOUR"
         if interval == "15m": angel_interval = "FIFTEEN_MINUTE"
 
+        # CAP DURATION to prevent API Error (AB1004)
+        # 15m limit is likely ~30-60 days
+        if angel_interval == "FIFTEEN_MINUTE" and days_to_fetch > 30:
+            print(f"⚠️ Gap {days_to_fetch} days too large for 15m. Capping to 30.")
+            days_to_fetch = 30
+        elif angel_interval == "ONE_HOUR" and days_to_fetch > 90:
+             print(f"⚠️ Gap {days_to_fetch} days too large for 1h. Capping to 90.")
+             days_to_fetch = 90
+
         new_data = mgr.fetch_hist_data(symbol, interval=angel_interval, days=days_to_fetch)
         
     except Exception as e:
