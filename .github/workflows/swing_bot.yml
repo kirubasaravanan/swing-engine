@@ -90,12 +90,18 @@ jobs:
             
         if angel_raw and 'angel' not in secrets and 'ANGEL_API_KEY' not in secrets:
              # If we failed to parse/merge, append raw (Fallback)
+             print("⚠️ Appending Raw Angel Credentials (Fallback)")
              with open('.streamlit/secrets.toml', 'a') as f:
                 f.write('\n' + angel_raw + '\n')
         EOF
 
         # Run Generator
         python generate_secrets.py
+        
+        # DEBUG: Show File Content (Secrets will be masked by GitHub automatically)
+        echo "--- DEBUG: SECRETS.TOML CONTENT ---"
+        cat .streamlit/secrets.toml
+        echo "-----------------------------------"
         
         # Run Bot
         python swing_bot.py
