@@ -100,7 +100,22 @@ def sync_from_cloud():
             "last_synced": str(datetime.datetime.now())
         }
         
-        # Preserve Watchlist (Local Only for now)
+        # 4. Watchlist (New Sync)
+        try: ws_w = wb.worksheet("Watchlist")
+        except: ws_w = wb.add_worksheet("Watchlist", 100, 10)
+        watchlist = ws_w.get_all_records()
+
+        db = {
+            "portfolio": portfolio,
+            "history": history,
+            "scan_results": scans,
+            "watchlist": watchlist,
+            "last_synced": str(datetime.datetime.now())
+        }
+        
+        # Preserve Watchlist (Local Only for now) -> No, now we have Cloud!
+        # Merge Check: If Cloud is empty but Local has data, push local? 
+        # For now, Cloud is Truth.
         local_db = load_local_db()
         if "watchlist" in local_db:
             db["watchlist"] = local_db["watchlist"]
@@ -127,6 +142,26 @@ def push_portfolio_to_cloud(portfolio_data):
         return True
     except Exception as e:
         print(f"Cloud Push Failed: {e}")
+        return False
+
+def push_watchlist_to_cloud(watchlist_data):
+    """Overwrites Watchlist in Cloud with Local Data."""
+    try:
+        wb = connect_db()
+        try: ws = wb.worksheet("Watchlist")
+        except: ws = wb.add_worksheet("Watchlist", 100, 10)
+        
+        ws.clear()
+        
+        if watchlist_data:
+            # Ensure consistenct dicts
+            headers = list(watchlist_data[0].keys())
+            ws.append_row(headers)
+            rows = [list(x.values()) for x in watchlist_data]
+            ws.append_rows(rows)
+        return True
+    except Exception as e:
+        print(f"Watchlist Cloud Push Failed: {e}")
         return False
 
 # --- READ METHODS (INSTANT) ---
@@ -191,6 +226,11 @@ def save_watchlist(data):
     db = load_local_db()
     db["watchlist"] = data
     save_local_db(db)
+    
+    # Push to Cloud
+    try:
+        push_watchlist_to_cloud(data)
+    except: pass
 
 def delete_trade(symbol):
     # 1. Update Local (Precise List Remove)

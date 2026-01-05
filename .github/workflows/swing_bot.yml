@@ -98,10 +98,7 @@ jobs:
         # Run Generator
         python generate_secrets.py
         
-        # DEBUG: Show File Content (Secrets will be masked by GitHub automatically)
-        echo "--- DEBUG: SECRETS.TOML CONTENT ---"
-        cat .streamlit/secrets.toml
-        echo "-----------------------------------"
+
         
         # Run Bot
         python swing_bot.py

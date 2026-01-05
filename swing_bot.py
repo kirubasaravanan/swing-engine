@@ -115,7 +115,8 @@ def run_cycle(scheduled_time):
              # Pass cached data to check_exits
              exits = engine.check_exits(trades_df, data_map=data_map)
              for ex in exits:
-                 action = ex.get('Action', 'NONE')
+                 # FIX: Engine key is 'Signal', not 'Action'
+                 action = ex.get('Signal', 'NONE')
                  if "EXIT" in action or "BOOK" in action:
                      logger.info(f"   🚨 SELL: {ex['Symbol']}")
                      if discord: discord.notify_exit_signal(ex['Symbol'], ex['Reason'], ex['Price'])
