@@ -113,14 +113,14 @@ def sync_from_cloud():
             "last_synced": str(datetime.datetime.now())
         }
         
-        # Preserve Watchlist (Local Only for now) -> No, now we have Cloud!
-        # Merge Check: If Cloud is empty but Local has data, push local? 
-        # For now, Cloud is Truth.
-        local_db = load_local_db()
-        if "watchlist" in local_db:
-            db["watchlist"] = local_db["watchlist"]
-        else:
-            db["watchlist"] = []
+        # Cloud is Truth for Watchlist now (Bot pushes to it)
+        # If Cloud is empty, we accept empty (until Bot runs)
+        if not db["watchlist"]:
+             # Fallback: check local ONLY if cloud is empty? 
+             # No, confusing. Let's stick to Cloud Truth.
+             pass
+             
+        save_local_db(db)
 
         save_local_db(db)
         return True, "Synced Successfully"
@@ -220,7 +220,11 @@ def add_trade(symbol, entry, qty=1, stop=0, tqs=0):
 # --- WATCHLIST METHODS ---
 def fetch_watchlist():
     db = load_local_db()
-    return db.get("watchlist", [])
+    if db and "watchlist" in db: return db["watchlist"]
+    
+    # Fallback: Sync if missing
+    sync_from_cloud()
+    return load_local_db().get("watchlist", [])
 
 def save_watchlist(data):
     db = load_local_db()
