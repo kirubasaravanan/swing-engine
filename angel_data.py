@@ -132,18 +132,34 @@ class AngelDataManager:
                 "todate": to_date.strftime(fmt)
             }
             
-            res = self.manager.smart_api.getCandleData(params)
+            # RETRY LOOP (Rate Limit & Token Handling)
+            max_retries = 3
+            for attempt in range(max_retries):
+                res = self.manager.smart_api.getCandleData(params)
+                
+                # Check Success
+                if res['status'] and res['data']:
+                    break # Success!
+                    
+                # Handle Token Error
+                if not res['status'] and (res['errorcode'] == 'AG8001' or 'Invalid Token' in res['message']):
+                    print(f"⚠️ Token Expired for {symbol}. Re-authenticating...")
+                    success, msg = self.manager.login()
+                    if success: continue # Retry loop
+                    else: return pd.DataFrame()
+                
+                # Handle Rate Limit / AB1004
+                if not res['status'] and res['errorcode'] == 'AB1004':
+                    wait_time = (attempt + 1) * 2 # 2s, 4s, 6s
+                    print(f"⚠️ Rate Limit (AB1004) for {symbol}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                
+                # Other Errors -> Break
+                break
             
-            # HANDLE TOKEN EXPIRY (Auto-Retry)
-            if not res['status'] and (res['errorcode'] == 'AG8001' or 'Invalid Token' in res['message']):
-                print(f"⚠️ Token Expired for {symbol}. Re-authenticating...")
-                success, msg = self.manager.login()
-                if success:
-                    # Retry Fetch
-                    res = self.manager.smart_api.getCandleData(params)
-                else:
-                    print(f"❌ Re-login failed: {msg}")
-                    return pd.DataFrame()
+            # THROTTLE (Prevent bursting)
+            time.sleep(0.4) 
 
             if res['status'] and res['data']:
                 # Parse Data
