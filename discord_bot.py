@@ -106,6 +106,15 @@ class DiscordBot:
             webhook_url=self.url_stocks
         )
 
+    def notify_new_entry(self, symbol, price, tqs):
+        """New Watchlist Entry -> STOCKS CHANNEL"""
+        self.send_embed(
+            title=f"👀 New Watchlist Add: {symbol}",
+            description=f"TQS Score: **{tqs}**\nPrice: ₹{price}",
+            color=0x3498db, # Blue
+            webhook_url=self.url_stocks
+        )
+
     def notify_job_status(self, message, is_error=False):
         """Generic Job Status -> BOT CHANNEL"""
         color = 0xe74c3c if is_error else 0x95a5a6 # Red or Grey
