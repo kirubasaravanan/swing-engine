@@ -158,6 +158,17 @@ def run_cycle(scheduled_time):
         if open_slots > 0:
             # Pass cached data to scan
             results = engine.scan(data_map=data_map)
+            
+            # 1. Sync Radar (Scan Results) to Cloud
+            if results:
+                sheets_db.save_scan_results(results)
+                
+            # 2. Sync Watchlist (Update Tracking)
+            try:
+                engine.update_watchlist() # This handles saving to DB inside engine
+            except Exception as e:
+                logger.error(f"Watchlist Update Failed: {e}")
+
             high_qual = [x for x in results if x['TQS'] >= 8]
             high_qual.sort(key=lambda x: (-x['TQS'], x['Price']))
             
